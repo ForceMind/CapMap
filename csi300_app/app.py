@@ -186,10 +186,12 @@ def fetch_history_data():
 
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=3600*24)
-def fetch_cached_min_data(symbol, date_str, is_index=False):
+def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
     """
     原子化获取单个标的的分时数据，独立缓存。
     避免因股票列表组合变化导致整个缓存失效。
+    params:
+    period: '1', '5', '15', '30', '60'
     """
     start_time = f"{date_str} 09:30:00"
     end_time = f"{date_str} 15:00:00"
@@ -199,10 +201,10 @@ def fetch_cached_min_data(symbol, date_str, is_index=False):
         try:
             if is_index:
                 # 指数接口
-                df = ak.index_zh_a_hist_min_em(symbol=symbol, period="1", start_date=start_time, end_date=end_time)
+                df = ak.index_zh_a_hist_min_em(symbol=symbol, period=period, start_date=start_time, end_date=end_time)
             else:
                 # 个股接口
-                df = ak.stock_zh_a_hist_min_em(symbol=symbol, start_date=start_time, end_date=end_time, period='1', adjust='qfq')
+                df = ak.stock_zh_a_hist_min_em(symbol=symbol, start_date=start_time, end_date=end_time, period=period, adjust='qfq')
             
             if df is not None and not df.empty:
                 # 统一列名
@@ -219,15 +221,16 @@ def fetch_cached_min_data(symbol, date_str, is_index=False):
                 return df[['time', 'pct_chg', 'close']]
                 
         except Exception:
+            # 如果是请求失败，稍作等待
             time.sleep(0.3 + random.random() * 0.5)
+            # 如果是数据源确实没有(比如请求了1分钟线的30天前数据)，可能重试也没用，但无法区分 Exception 类型
             
     return None
 
-def fetch_intraday_data_v2(stock_codes, target_date_str):
+def fetch_intraday_data_v2(stock_codes, target_date_str, period='1'):
     """
     获取指定股票列表 + 三大指数 的分钟级数据。
     v2: 增加上证、深证指数，优化缓存，原子化调用。
-    注意：此函数本身不再缓存，因为它只是组装者，且输入列表经常变化。
     """
     results = [] 
     
@@ -241,7 +244,7 @@ def fetch_intraday_data_v2(stock_codes, target_date_str):
     # 1. 获取指数数据
     for idx_code, idx_name in indices_map.items():
         try:
-            idx_data = fetch_cached_min_data(idx_code, target_date_str, is_index=True)
+            idx_data = fetch_cached_min_data(idx_code, target_date_str, is_index=True, period=period)
             
             if idx_data is not None:
                 results.append({
@@ -257,7 +260,7 @@ def fetch_intraday_data_v2(stock_codes, target_date_str):
     # 2. 获取个股数据
     for code, name, to_val in stock_codes:
         try:
-            stk_data = fetch_cached_min_data(code, target_date_str, is_index=False)
+            stk_data = fetch_cached_min_data(code, target_date_str, is_index=False, period=period)
             
             if stk_data is not None:
                 results.append({
@@ -458,9 +461,15 @@ if not origin_df.empty:
             # 循环获取所有目标日期的数据并合并
             all_intraday_data = [] # List of results
             
-            # 用户要求移除限制，但为了防止无响应，仅在数量极多时提示
-            if len(target_dates) > 10 and playback_mode == "多日走势拼接":
-                st.toast(f"⚠️ 您选择了 {len(target_dates)} 天的数据，拉取和渲染可能需要较长时间，请耐心等待...")
+            # 自动调整数据精度策略
+            # 1分钟线通常只能获取最近5天
+            # 5分钟线通常能获取最近1-2个月
+            period_to_use = '1'
+            if len(target_dates) > 5 and playback_mode == "多日走势拼接":
+                period_to_use = '5'
+                st.info(f"ℹ️ 您选择了 {len(target_dates)} 天：系统自动切换至【5分钟级】数据，以支持查看更久远的历史走势。")
+            elif len(target_dates) > 10:
+                 st.toast(f"⚠️ 您选择了 {len(target_dates)} 天的数据，加载可能较慢，请耐心等待...")
             
             target_dates_to_fetch = target_dates
 
@@ -477,7 +486,7 @@ if not origin_df.empty:
                 # 实际上画图时我们希望线宽随【当日】成交额变化？或者保持一致？
                 # 如果是多日拼接，建议线宽固定或取平均。简单起见，线宽使用最后一天的成交额定级。
                 
-                day_results = fetch_intraday_data_v2(target_stocks_list, d_str)
+                day_results = fetch_intraday_data_v2(target_stocks_list, d_str, period=period_to_use)
                 
                 # 为数据添加 'date_str' 标识
                 for res in day_results:
@@ -638,20 +647,28 @@ if not origin_df.empty:
                         max_to = max([s['turnover'] for s in stocks]) if stocks else 1
                         min_to = min([s['turnover'] for s in stocks]) if stocks else 0
                         
-                        for s in stocks:
+                        # 生成 distinct colors
+                        color_palette = px.colors.qualitative.Alphabet + px.colors.qualitative.Dark24
+                        
+                        for i, s in enumerate(stocks):
                             if max_to == min_to: width=2
                             else: width = 1 + 3*(s['turnover'] - min_to)/(max_to - min_to)
                             
                             df_p = s['plot_data']
                             last_val = df_p['cumulative_pct'].iloc[-1]
-                            color = 'rgba(214, 39, 40, 0.4)' if last_val > 0 else 'rgba(44, 160, 44, 0.4)'
+                            
+                            # 之前的红绿逻辑: color = 'rgba(214, 39, 40, 0.4)' if last_val > 0 else 'rgba(44, 160, 44, 0.4)'
+                            # 现在改为区分颜色
+                            color = color_palette[i % len(color_palette)]
                             
                             fig.add_trace(go.Scatter(
                                 x=df_p['x_int'],
                                 y=df_p['cumulative_pct'],
                                 mode='lines',
                                 name=s['name'],
-                                line=dict(width=width, color=color),
+                                # line=dict(width=width, color=color),
+                                # 个股线宽不需要太粗，颜色要清晰
+                                line=dict(width=max(1.5, width), color=color),
                                 hovertemplate=f"<b>{s['name']}</b><br>涨跌: %{{y:.2f}}%<br>时间: %{{customdata}}",
                                 customdata=df_p['date_col'] + ' ' + df_p['time_str']
                             ))
@@ -699,8 +716,17 @@ if not origin_df.empty:
                         yaxis_title="累计涨跌幅 (%)",
                         hovermode="x unified", # 开启统一 Hover，显示该时间点所有数据
                         height=700, # 稍微调高高度以容纳更多 Hover 信息
-                        legend=dict(orientation="h", y=1.02, x=1, xanchor='right')
+                        legend=dict(orientation="h", y=1.02, x=1, xanchor='right') # 保持图例的布局
                     )
+                    
+                    # ⚠️ 关键修正：确保 Hover Tooltip 的排序按照 Y 轴数值 (从高到低)
+                    # "closest" 模式配合 "compare" 可能无法生效，但在 "x unified" 模式下，
+                    # 默认是按照 Trace 添加顺序排序的。
+                    # Plotly (JS层) 在 x unified 下有默认排序逻辑 (通常是 value descending)，但在某些版本可能不稳定。
+                    # 为了增强排序体验，我们可以尝试设置 layout.hoverlabel.namelength = -1
+                    
+                    fig.update_layout(hoverlabel=dict(namelength=-1))
+                    
                     return fig
 
                 tab1, tab2 = st.tabs(["沪市 (SH)", "深市 (SZ)"])
