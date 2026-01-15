@@ -485,13 +485,40 @@ st.markdown("""
 
 # 侧边栏
 with st.sidebar:
-    st.header("控制台")
-    if st.button("🔄 强制刷新数据"):
-        if os.path.exists(CACHE_FILE):
-            os.remove(CACHE_FILE)
-            st.toast("已删除本地缓存，即将重新获取...")
-        st.cache_data.clear()
-        st.rerun()
+    st.header("⚙️ 数据管理")
+    
+    with st.expander("数据刷新与维护", expanded=True):
+        st.write("如果数据显示不正确，请尝试以下操作：")
+        
+        # 1. 刷新盘中
+        if st.button("🟢 刷新今日行情 (盘中)"):
+            try:
+                if os.path.exists(CACHE_FILE):
+                    # 读取并删除今天的记录，强制下次加载时触发增量更新
+                    _df = pd.read_parquet(CACHE_FILE)
+                    _today = datetime.now().date()
+                    # 过滤掉 >= 今天的数据
+                    _df_new = _df[_df['日期'].dt.date < _today]
+                    _df_new.to_parquet(CACHE_FILE)
+                    st.toast("已清除今日缓存，正在重新拉取实时数据...")
+                st.cache_data.clear() # 即使是分时数据最好也清一下，以防万一
+                st.rerun()
+            except Exception as e:
+                st.error(f"操作失败: {e}")
+
+        # 2. 清理分时缓存
+        if st.button("🧹 清空分时图缓存"):
+            st.cache_data.clear()
+            st.toast("✅ 所有内存缓存已清空，下次查看分时图将重新下载。")
+
+        # 3. 硬重置
+        if st.button("🚨 彻底重置 (删除所有)"):
+            if os.path.exists(CACHE_FILE):
+                os.remove(CACHE_FILE)
+                st.toast("已删除本地所有历史数据。")
+            st.cache_data.clear()
+            st.rerun()
+
     st.info("数据源：沪深300成分股 (AkShare)")
     st.caption("注：方块大小使用'成交额'代替'市值'，\n反映当日交易热度。")
 
@@ -666,7 +693,13 @@ if not origin_df.empty:
     st.subheader("📈 核心资产分时走势叠加")
     
     # 模式选择
-    chart_mode = st.radio("选股模式", ["成交额 Top 10 (活跃度)", "指数贡献 Top 20 (影响大盘)"], horizontal=True)
+    col_mode, col_num = st.columns([3, 1])
+    with col_mode:
+        chart_mode = st.radio("选股模式", ["成交额 Top (活跃度)", "指数贡献 Top (影响大盘)"], horizontal=True)
+    with col_num:
+        top_n = st.number_input("标的数量", min_value=5, max_value=50, value=20, step=5, help="成交额模式下为总数；指数贡献模式下为沪/深各取 N 个")
+
+    st.caption(f"注：这里的排名是基于 **{selected_date}** 当日的数据计算的。如果是多日模式，则展示这些股票在过去几天的走势。")
     st.caption("注：指数贡献 = 涨跌幅 × 权重(近似为成交额/市值占比)。此模式能看到是谁在拉动或砸盘。")
 
     show_intraday = st.checkbox("加载分时走势 (需从网络实时拉取)", value=False)
@@ -675,10 +708,10 @@ if not origin_df.empty:
         with st.spinner(f"正在拉取 {len(target_dates)} 天的分钟线数据 (范围: {target_dates[0]} ~ {target_dates[-1]})..."):
             
             if "成交额" in chart_mode:
-                # 原逻辑：成交额最高
-                top_stocks_df = daily_df.sort_values('成交额', ascending=False).head(10)
+                # 成交额最高 Top N
+                top_stocks_df = daily_df.sort_values('成交额', ascending=False).head(top_n)
             else:
-                # 新逻辑：指数贡献度 (上海 Top 20 + 深圳 Top 20)
+                # 新逻辑：指数贡献度 (上海 Top N + 深圳 Top N)
                 # Impact = abs(涨跌幅 * 成交额) 
                 daily_df['abs_impact'] = (daily_df['涨跌幅'] * daily_df['成交额']).abs()
                 
@@ -686,8 +719,8 @@ if not origin_df.empty:
                 sh_pool = daily_df[daily_df['代码'].astype(str).str.startswith('6')].copy()
                 sz_pool = daily_df[~daily_df['代码'].astype(str).str.startswith('6')].copy()
                 
-                sh_top = sh_pool.sort_values('abs_impact', ascending=False).head(20)
-                sz_top = sz_pool.sort_values('abs_impact', ascending=False).head(20)
+                sh_top = sh_pool.sort_values('abs_impact', ascending=False).head(top_n)
+                sz_top = sz_pool.sort_values('abs_impact', ascending=False).head(top_n)
                 
                 top_stocks_df = pd.concat([sh_top, sz_top], ignore_index=True)
 
