@@ -7,6 +7,9 @@ from datetime import datetime, timedelta
 import time
 import random
 import os
+import concurrent.futures
+import threading
+import sys
 
 # 配置页面信息
 st.set_page_config(
@@ -52,21 +55,29 @@ def fetch_history_data():
     # 2. 计算需要下载的时间范围
     today = datetime.now().date()
     
-    # 如果已经有今天的最新数据（假设下午3点后才算今天结束，简单起见只要缓存日期>=今天 或者 >=昨天且现在没收盘，就不更新了? 
-    # 为了严谨，只要缓存日期 < 今天，就尝试获取增量。但这在盘中可能会导致重复获取昨天的数据如果昨天是休市日?
-    # 简化逻辑：如果缓存为空，下载过去3年。如果缓存非空，下载 [last_date + 1 day, today]。
+    # 如果缓存里的日期已经是今天，且现在是盘中，可能用户想刷新
+    # 但简单起见，我们设定：如果缓存最新日期 < 今天，肯定要尝试下载。
+    # 如果缓存最新日期 == 今天，只有当强制刷新时才通过(外部控制)，这里函数内部先假设"已是最新"
+    # 但为了支持盘中刷新，如果 last_cached_date == today，我们其实可以重拉今天的。
+    # 这里我们只处理 last_cached_date < today 的自动增量, 或者 force refresh (caller clears cache)
     
     if last_cached_date:
-        start_date_str = (last_cached_date + timedelta(days=1)).strftime("%Y%m%d")
-        # 如果缓存是最新的（比如今天是周日，缓存是周五，today是周日，start_date是周六。下载周六到周日的数据为空，这是ok的）
         if last_cached_date >= today:
-            return cached_df
+             # 如果已经有今天的数据，暂时直接返回 (用户需点击强制刷新来更新今日盘中数据)
+             # 但为了能够"自动"拉取盘中，如果 last_cached_date == today，我们做个判断？
+             # 现在的逻辑是：如果缓存文件存在且日期>=今天，就不动了。
+             # 这导致如果早上9点跑了一次（有数据），下午3点再跑，还是旧的。
+             # 改进：如果是今天，且现在还没收盘，或者刚收盘，允许覆盖？
+             # 暂保留原逻辑防止频繁请求，依靠 "强制刷新" 按钮来清空缓存。
+             return cached_df
+        
+        start_date_str = (last_cached_date + timedelta(days=1)).strftime("%Y%m%d")
     else:
         start_date_str = get_start_date(2)
         
     end_date_str = today.strftime("%Y%m%d")
 
-    # 如果不需要更新 (start > end)
+    # 如果不需要更新
     if start_date_str > end_date_str:
         return cached_df
 
@@ -75,28 +86,24 @@ def fetch_history_data():
     progress_bar = st.progress(0)
     
     try:
-        # 如果是增量更新，就不显示太吓人的"正在获取列表..."，除非范围很大
+        # 如果是增量更新
         is_incremental = not cached_df.empty
         if not is_incremental:
             status_text.text("正在初始化全量历史数据...")
         else:
             status_text.text(f"正在检查增量数据 ({start_date_str} - {end_date_str})...")
 
-        # 获取列表
+        # 获取成分股列表
         try:
             cons_df = ak.index_stock_cons(symbol="000300")
         except:
-             # 如果获取成分股列表失败，且我们有缓存，就直接用缓存算了
              if not cached_df.empty:
-                 st.warning("网络连接不稳定，无法获取最新成分股，仅显示本地历史数据。")
+                 st.warning("成分股列表获取失败，使用缓存数据")
                  return cached_df
-             else:
-                 return pd.DataFrame()
-        
-        # ... 处理列名 ...
-        if cons_df is None or cons_df.empty:
-             if not cached_df.empty: return cached_df
              return pd.DataFrame()
+        
+        if cons_df is None or cons_df.empty:
+             return cached_df if not cached_df.empty else pd.DataFrame()
 
         if 'variety' in cons_df.columns:
             code_col, name_col = 'variety', 'name'
@@ -112,27 +119,92 @@ def fetch_history_data():
         new_data_list = []
         total_stocks = len(stock_list)
         
-        # 循环获取
-        for idx, code in enumerate(stock_list):
-            if not is_incremental:
-                current_progress = (idx + 1) / total_stocks
-                progress_bar.progress(current_progress)
-                name = stock_names.get(code, code)
-                status_text.text(f"正在下载 ({idx+1}/{total_stocks}): {name} ...")
-            else:
-                # 增量更新时不显示那么细的进度条，或者只在每10个显示一次
-                if idx % 10 == 0:
-                    status_text.text(f"增量更新中: {idx}/{total_stocks} 完成...")
-            
+        # --- 尝试获取今日实时数据 (Spot) 作为补充 ---
+        # 很多时候 stock_zh_a_hist 在盘中不返回当日数据，或者有些源不返回。
+        # 我们可以拉取 ak.stock_zh_a_spot_em() 获取所有A股实时行情，然后过滤出 CSI300
+        # 仅当我们需要 "今天" 的数据时 (start_date_str <= today_str)
+        today_spot_map = {}
+        has_today_hist = False # 标记是否通过 hist 接口拿到了今天数据
+        
+        if end_date_str >= start_date_str:
+             try:
+                 spot_df = ak.stock_zh_a_spot_em()
+                 if spot_df is not None and not spot_df.empty:
+                     # spot_df columns: 代码, 名称, 最新价, 涨跌幅, 成交额 ...
+                     # 建立映射: code -> row
+                     spot_df['代码'] = spot_df['代码'].astype(str)
+                     today_spot_map = spot_df.set_index('代码').to_dict('index')
+             except Exception as e:
+                 print(f"Spot fetch failed: {e}")
+
+        # 循环获取历史
+        # 使用 ThreadPoolExecutor 加速增量历史下载 (如果需要下载很多天)
+        # 但 akshare 接口频繁调用可能受限，适度并发
+        
+        def fetch_one_stock(code, name):
             try:
+                # 获取日线
                 df_hist = ak.stock_zh_a_hist(symbol=code, start_date=start_date_str, end_date=end_date_str, adjust="qfq")
+                
+                # 检查是否包含今天
+                # 如果 df_hist 不包含今天，但我们有 today_spot_map，则人工补一行
+                fetched_today = False
                 if df_hist is not None and not df_hist.empty:
-                    df_hist = df_hist[['日期', '收盘', '涨跌幅', '成交额']].copy()
+                    df_hist['日期'] = pd.to_datetime(df_hist['日期'])
+                    if end_date_str in df_hist['日期'].dt.strftime("%Y%m%d").values:
+                        fetched_today = True
+                else:
+                    df_hist = pd.DataFrame()
+
+                # 如果没有拉到今天的数据，且我们需要今天 (end_date_str == today)，补全
+                if (not fetched_today) and (end_date_str == datetime.now().strftime("%Y%m%d")):
+                    if code in today_spot_map:
+                        row = today_spot_map[code]
+                        # 构造一行
+                        # 必须字段: 日期, 收盘, 涨跌幅, 成交额, 代码, 名称
+                        # spot row keys: '最新价', '涨跌幅', '成交额'
+                        try:
+                             new_row = pd.DataFrame([{
+                                 '日期': pd.to_datetime(end_date_str),
+                                 '收盘': row['最新价'],
+                                 '涨跌幅': row['涨跌幅'],
+                                 '成交额': row['成交额'],
+                                 '代码': code,
+                                 '名称': name
+                             }])
+                             df_hist = pd.concat([df_hist, new_row], ignore_index=True)
+                        except:
+                            pass
+                
+                if df_hist is not None and not df_hist.empty:
+                    # 确保列存在
+                    if '日期' not in df_hist.columns: return None
+                    cols_needed = ['日期', '收盘', '涨跌幅', '成交额']
+                    for c in cols_needed:
+                        if c not in df_hist.columns: return None
+                    
+                    df_hist = df_hist[cols_needed].copy()
                     df_hist['代码'] = code
                     df_hist['名称'] = name
-                    new_data_list.append(df_hist)
+                    return df_hist
             except Exception:
                 pass
+            return None
+
+        # 如果是增量只差1天，其实单线程也快。如果是初始化，并发。
+        # Use concurrency
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+             future_map = {executor.submit(fetch_one_stock, c, stock_names.get(c, c)): c for c in stock_list}
+             
+             for i, future in enumerate(concurrent.futures.as_completed(future_map)):
+                 # Update progress
+                 if i % 10 == 0:
+                     progress_bar.progress((i + 1) / total_stocks)
+                     status_text.text(f"正在同步数据: {i+1}/{total_stocks}")
+                 
+                 res = future.result()
+                 if res is not None:
+                     new_data_list.append(res)
                 
         status_text.empty()
         progress_bar.empty()
@@ -196,8 +268,17 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
     start_time = f"{date_str} 09:30:00"
     end_time = f"{date_str} 15:00:00"
     
+    # 指数退避策略全局变量 (简单模拟，实际环境应用类封装)
+    # 使用函数属性暂存状态
+    if not hasattr(fetch_cached_min_data, "current_backoff"):
+        fetch_cached_min_data.current_backoff = 0
+            
     # 简单的重试机制
-    for _ in range(3):
+    max_retries = 3
+    
+    # 如果处于"冷却期"内? 这里简化为：每次失败后增加等待时间，成功则重置
+    
+    for attempt in range(max_retries):
         try:
             if is_index:
                 # 指数接口
@@ -207,6 +288,11 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
                 df = ak.stock_zh_a_hist_min_em(symbol=symbol, start_date=start_time, end_date=end_time, period=period, adjust='qfq')
             
             if df is not None and not df.empty:
+                # 成功 - 重置退避
+                if fetch_cached_min_data.current_backoff > 0:
+                     print(f"[{datetime.now().time()}] API Recovered. Resetting backoff.")
+                     fetch_cached_min_data.current_backoff = 0
+
                 # 统一列名
                 if '时间' in df.columns:
                     df.rename(columns={'时间': 'time', '开盘': 'open', '收盘': 'close'}, inplace=True)
@@ -220,17 +306,112 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
                 
                 return df[['time', 'pct_chg', 'close']]
                 
-        except Exception:
-            # 如果是请求失败，稍作等待
-            time.sleep(0.3 + random.random() * 0.5)
-            # 如果是数据源确实没有(比如请求了1分钟线的30天前数据)，可能重试也没用，但无法区分 Exception 类型
+        except Exception as e:
+            # 失败处理逻辑
+            # 如果是特定的 API 限制错误 (需分析 e，这里简单假设所有异常都可能由频率导致)
+            # 增加退避时间
+            if fetch_cached_min_data.current_backoff == 0:
+                fetch_cached_min_data.current_backoff = 60 # 初始 1 分钟
+            else:
+                fetch_cached_min_data.current_backoff *= 2 # 翻倍
             
+            wait_time = fetch_cached_min_data.current_backoff
+            
+            # 只有当这是后台预取任务时才进行长时间等待? 
+            # 前台实时拉取不宜等待太久。这里我们添加一个上下文判断是不现实的。
+            # 但既然用户提到了"翻倍等待"，这通常是针对后台爬虫。
+            # 对于前台交互，等待1分钟用户早跑了。
+            # 为了兼容，我们只在 "预取/爬虫" 模式下启用此逻辑？ 
+            # 但 fetch_cached_min_data 是通用函数。
+            # 妥协：如果等待时间很长 (>5s)，则可以认为这是一个需要长时间恢复的错误，
+            # 在前台直接失败比较好。在后台则 sleep。
+            # 但这里无法区分。我们假设此严格的退避策略只在外部控制循环中生效比较好。
+            # 修改：将严格的退避逻辑移到调用方的 loop 中 (Task Worker)，
+            # 这里的 fetch_cached_min_data 只负责单次尝试。
+            pass
+
     return None
+
+# --- 新增：后台预取线程逻辑 ---
+def background_prefetch_task(date_list, origin_df):
+    """
+    后台线程：执行数据预取。
+    """
+    total_dates = len(date_list)
+    print(f"\n[Background Worker] Started prefetch for {total_dates} days.")
+    
+    current_backoff = 0 # 秒
+    
+    indices_codes = ["000300", "000001", "399001"]
+    
+    for i, d in enumerate(date_list):
+        d_str = d.strftime("%Y-%m-%d")
+        print(f"[Background Worker] Processing: {d_str} ({i+1}/{total_dates})")
+        
+        # 筛选
+        daily = origin_df[origin_df['日期'].dt.date == d]
+        if daily.empty: continue
+        
+        # Top 25
+        top_stocks = daily.sort_values('成交额', ascending=False).head(25)['代码'].tolist()
+        
+        # 任务列表
+        tasks = []
+        for code in indices_codes: tasks.append((code, d_str, True))
+        for code in top_stocks: tasks.append((code, d_str, False))
+        
+        # 内层逐个执行 (为了方便控制退避，且后台任务不急于一时的并发，稳定第一)
+        # 如果要并发，也必须在并发发生异常时捕获并触发退避。
+        # 简单起见，这里按顺序或小批次执行。
+        
+        for t_code, t_date, t_is_index in tasks:
+            
+            # Indefinite retry loop with backoff
+            while True:
+                try:
+                    # 检查退避
+                    if current_backoff > 0:
+                        print(f"[Background Worker] In cool-down state. Waiting {current_backoff} seconds...")
+                        time.sleep(current_backoff)
+                        
+                    # 尝试拉取 (fetch_cached_min_data 内部有缓存，如果已存在会直接返回)
+                    # 为了测试 API 连接，如果缓存已存在，其实不会触发网络请求。
+                    # 我们需要假设 fetch_cached_min_data 会处理网络。
+                    # 注意：fetch_cached_min_data 被 @st.cache_data 装饰。
+                    # 在后台线程调用 st.cache_data 装饰的函数通常是没问题的。
+                    
+                    fetch_cached_min_data(t_code, t_date, is_index=t_is_index, period='1')
+                    # 只有当我们需要更多数据时才拉5分钟
+                    # fetch_cached_min_data(t_code, t_date, is_index=t_is_index, period='5') 
+                    
+                    # Success
+                    if current_backoff > 0:
+                        print(f"[Background Worker] Recovered. Resetting backoff.")
+                        current_backoff = 0
+                    
+                    # 拉取成功后稍微 sleep 一下避免过于频繁 (0.1s)
+                    time.sleep(0.1)
+                    break # 跳出 while，处理下一个 task
+
+                except Exception as e:
+                    print(f"[Background Worker] Error fetching {t_code} on {t_date}: {e}")
+                    # 触发退避机制
+                    if current_backoff == 0:
+                        current_backoff = 60
+                    else:
+                        current_backoff *= 2
+                    
+                    print(f"[Background Worker] Backoff increased to {current_backoff}s. Retrying same task...")
+                    # Loop continues, will sleep at start of next iteration
+    
+    print("[Background Worker] All tasks completed.")
+
 
 def fetch_intraday_data_v2(stock_codes, target_date_str, period='1'):
     """
-    获取指定股票列表 + 三大指数 的分钟级数据。
+    获取指定股票列表 + 三大指数 的分钟级数据 (并发版)。
     v2: 增加上证、深证指数，优化缓存，原子化调用。
+    v3: 引入多线程并发加速
     """
     results = [] 
     
@@ -241,37 +422,52 @@ def fetch_intraday_data_v2(stock_codes, target_date_str, period='1'):
         "399001": "📉 深证成指"
     }
 
-    # 1. 获取指数数据
-    for idx_code, idx_name in indices_map.items():
-        try:
-            idx_data = fetch_cached_min_data(idx_code, target_date_str, is_index=True, period=period)
-            
-            if idx_data is not None:
-                results.append({
-                    'code': idx_code,
-                    'name': idx_name,
-                    'data': idx_data,
-                    'turnover': 99999999999, # Sort order
-                    'is_index': True
-                })
-        except Exception as e:
-            print(f"Index {idx_code} fetch failed: {e}")
+    # 任务列表
+    tasks = []
 
-    # 2. 获取个股数据
+    # 1. 提交指数任务
+    for idx_code, idx_name in indices_map.items():
+        tasks.append({
+            'type': 'index',
+            'code': idx_code,
+            'name': idx_name,
+            'to_val': 99999999999
+        })
+
+    # 2. 提交个股任务
     for code, name, to_val in stock_codes:
+        tasks.append({
+            'type': 'stock',
+            'code': code,
+            'name': name,
+            'to_val': to_val
+        })
+        
+    def _worker(task):
         try:
-            stk_data = fetch_cached_min_data(code, target_date_str, is_index=False, period=period)
-            
-            if stk_data is not None:
-                results.append({
-                    'code': code,
-                    'name': name,
-                    'data': stk_data,
-                    'turnover': to_val,
-                    'is_index': False
-                })
+            is_index = (task['type'] == 'index')
+            data = fetch_cached_min_data(task['code'], target_date_str, is_index=is_index, period=period)
+            if data is not None:
+                return {
+                    'code': task['code'],
+                    'name': task['name'],
+                    'data': data,
+                    'turnover': task['to_val'],
+                    'is_index': is_index
+                }
         except Exception:
-            pass 
+            pass
+        return None
+
+    # 并发执行
+    # 线程数不宜过多，以免触发反爬限制，10-20左右较为安全
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+        future_to_task = {executor.submit(_worker, t): t for t in tasks}
+        
+        for future in concurrent.futures.as_completed(future_to_task):
+            res = future.result()
+            if res:
+                results.append(res)
             
     return results
 
@@ -303,10 +499,47 @@ with st.sidebar:
     st.markdown("### 🛠️ 板块过滤")
     filter_cyb = st.checkbox("屏蔽创业板 (300开头)", value=False)
     filter_kcb = st.checkbox("屏蔽科创板 (688开头)", value=False)
-
+    
 # 加载数据
 with st.spinner("正在初始化历史数据仓库..."):
     origin_df = fetch_history_data()
+
+# --- 后台任务检测与控制 ---
+# 检查是否有名为 "PrefetchWorker" 的后台线程
+bg_thread = None
+for t in threading.enumerate():
+    if t.name == "PrefetchWorker":
+        bg_thread = t
+        break
+
+# 更新 Sidebar UI
+with st.sidebar:
+    st.markdown("---")
+    with st.expander("📥 后台数据预取", expanded=False):
+        st.caption("后台静默下载最近 N 天分时数据")
+        prefetch_days = st.number_input("预取天数", min_value=5, max_value=200, value=30, step=10)
+        
+        if bg_thread and bg_thread.is_alive():
+            st.info(f"🟢 后台任务运行中...\n请关注控制台(Console)日志")
+            # 无法通过 Button 停止线程，除非使用 Event。暂不实现停止。
+        else:
+            if st.button("🚀 启动后台下载"):
+                if not origin_df.empty:
+                    # 获取日期列表
+                    all_dates = sorted(origin_df['日期'].dt.date.unique())
+                    target_prefetch_dates = all_dates[-prefetch_days:]
+                    
+                    # 启动线程
+                    t = threading.Thread(
+                        target=background_prefetch_task,
+                        args=(target_prefetch_dates, origin_df),
+                        name="PrefetchWorker",
+                        daemon=True
+                    )
+                    t.start()
+                    st.rerun()
+                else:
+                    st.error("历史数据尚未就绪")
 
 if not origin_df.empty:
     # --- 全局过滤逻辑 ---
@@ -445,13 +678,18 @@ if not origin_df.empty:
                 # 原逻辑：成交额最高
                 top_stocks_df = daily_df.sort_values('成交额', ascending=False).head(10)
             else:
-                # 新逻辑：指数贡献度 Top 20
+                # 新逻辑：指数贡献度 (上海 Top 20 + 深圳 Top 20)
                 # Impact = abs(涨跌幅 * 成交额) 
-                # 这里用 成交额 近似 市值权重 (因为我们没有历史市值数据，成交额高的通常也是权重大的)
-                # 更精细一点：Impact = 涨跌幅 * 成交额 (区分正负)
-                # 我们取 绝对值最大的前20，即 涨得最猛的权重股 和 跌得最猛的权重股
                 daily_df['abs_impact'] = (daily_df['涨跌幅'] * daily_df['成交额']).abs()
-                top_stocks_df = daily_df.sort_values('abs_impact', ascending=False).head(20)
+                
+                # 分别筛选沪市和深市
+                sh_pool = daily_df[daily_df['代码'].astype(str).str.startswith('6')].copy()
+                sz_pool = daily_df[~daily_df['代码'].astype(str).str.startswith('6')].copy()
+                
+                sh_top = sh_pool.sort_values('abs_impact', ascending=False).head(20)
+                sz_top = sz_pool.sort_values('abs_impact', ascending=False).head(20)
+                
+                top_stocks_df = pd.concat([sh_top, sz_top], ignore_index=True)
 
             # 准备参数列表
             target_stocks_list = []
