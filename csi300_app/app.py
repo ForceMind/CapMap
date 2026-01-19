@@ -270,7 +270,7 @@ def fetch_history_data():
         return pd.DataFrame()
 
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=3600*24)
+@st.cache_data(ttl=3600*24, show_spinner=False)
 def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
     """
     原子化获取单个标的的分时数据，独立缓存。
@@ -762,25 +762,28 @@ if not origin_df.empty:
         target_dates_to_fetch = target_dates
         total_steps = len(target_dates_to_fetch)
 
-        # 在容器中渲染进度组件
-        with progress_area.container():
-             status_text = st.empty()
-             fetch_progress = st.progress(0)
+        # 改回扁平化结构，不再使用 container，减少 DOM 操作层级
+        # 并发线程中缓存的 show_spinner=False 已经设置，这里应该安全了
+        status_text = st.empty()
+        fetch_progress = st.progress(0)
              
-             for i, d_date in enumerate(target_dates_to_fetch):
-                status_text.text(f"🔄 正在获取: {d_date.strftime('%Y-%m-%d')} ({i+1}/{total_steps})...")
-                fetch_progress.progress((i + 1) / total_steps)
-                
-                d_str = d_date.strftime("%Y-%m-%d")
-                day_results = fetch_intraday_data_v2(target_stocks_list, d_str, period=period_to_use)
-                
-                for res in day_results:
-                     res['data']['date_col'] = d_str
-                     res['real_date'] = d_date
-                
-                all_intraday_data.extend(day_results)
+        for i, d_date in enumerate(target_dates_to_fetch):
+            status_text.text(f"🔄 正在获取: {d_date.strftime('%Y-%m-%d')} ({i+1}/{total_steps})...")
+            fetch_progress.progress((i + 1) / total_steps)
+            
+            d_str = d_date.strftime("%Y-%m-%d")
+            day_results = fetch_intraday_data_v2(target_stocks_list, d_str, period=period_to_use)
+            
+            for res in day_results:
+                    res['data']['date_col'] = d_str
+                    res['real_date'] = d_date
+            
+            all_intraday_data.extend(day_results)
         
-        # 数据拉取完毕后，彻底清空进度区域
+        # 数据拉取完毕后，清除进度组件
+        status_text.empty()
+        fetch_progress.empty()
+        # 移除外层占位符的清理，因为已经不再使用
         progress_area.empty()
             
         if not all_intraday_data:
