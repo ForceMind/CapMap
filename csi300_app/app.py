@@ -728,65 +728,60 @@ if not origin_df.empty:
     
     if show_intraday:
         # 使用 placeholder 放置进度条，避免组件销毁导致的索引错乱
-        progress_placeholder = st.empty()
-        fetch_progress = progress_placeholder.progress(0)
-
-        with st.spinner(f"正在拉取 {len(target_dates)} 天的分钟线数据 (范围: {target_dates[0]} ~ {target_dates[-1]})..."):
+        progress_area = st.empty()
+        
+        # 统一选股逻辑：无论是成交额还是指数贡献，都按沪深分别取 Top N
+        if "成交额" in chart_mode:
+            sort_col = '成交额'
+        else:
+            daily_df['abs_impact'] = (daily_df['涨跌幅'] * daily_df['成交额']).abs()
+            sort_col = 'abs_impact'
             
-            # 统一选股逻辑：无论是成交额还是指数贡献，都按沪深分别取 Top N
-            if "成交额" in chart_mode:
-                sort_col = '成交额'
-            else:
-                # 指数贡献度 Impact = abs(涨跌幅 * 成交额) 
-                daily_df['abs_impact'] = (daily_df['涨跌幅'] * daily_df['成交额']).abs()
-                sort_col = 'abs_impact'
+        sh_pool = daily_df[daily_df['代码'].astype(str).str.startswith('6')].copy()
+        sz_pool = daily_df[~daily_df['代码'].astype(str).str.startswith('6')].copy()
+        
+        sh_top = sh_pool.sort_values(sort_col, ascending=False).head(top_n)
+        sz_top = sz_pool.sort_values(sort_col, ascending=False).head(top_n)
+        
+        top_stocks_df = pd.concat([sh_top, sz_top], ignore_index=True)
+
+        target_stocks_list = []
+        for _, row in top_stocks_df.iterrows():
+            target_stocks_list.append((row['代码'], row['名称'], row['成交额'])) 
+        
+        all_intraday_data = [] 
+        
+        period_to_use = '1'
+        
+        if len(target_dates) > 5 and playback_mode == "多日走势拼接":
+            period_to_use = '5'
+            st.info(f"ℹ️ 您选择了 {len(target_dates)} 天：系统自动切换至【5分钟级】数据。")
+        elif len(target_dates) > 10:
+             st.toast(f"⚠️ 您选择了 {len(target_dates)} 天的数据，加载可能较慢，请耐心等待...")
+        
+        target_dates_to_fetch = target_dates
+        total_steps = len(target_dates_to_fetch)
+
+        # 在容器中渲染进度组件
+        with progress_area.container():
+             status_text = st.empty()
+             fetch_progress = st.progress(0)
+             
+             for i, d_date in enumerate(target_dates_to_fetch):
+                status_text.text(f"🔄 正在获取: {d_date.strftime('%Y-%m-%d')} ({i+1}/{total_steps})...")
+                fetch_progress.progress((i + 1) / total_steps)
                 
-            # 分别筛选沪市和深市
-            sh_pool = daily_df[daily_df['代码'].astype(str).str.startswith('6')].copy()
-            sz_pool = daily_df[~daily_df['代码'].astype(str).str.startswith('6')].copy()
-            
-            sh_top = sh_pool.sort_values(sort_col, ascending=False).head(top_n)
-            sz_top = sz_pool.sort_values(sort_col, ascending=False).head(top_n)
-            
-            top_stocks_df = pd.concat([sh_top, sz_top], ignore_index=True)
-
-            # 准备参数列表
-            target_stocks_list = []
-            for _, row in top_stocks_df.iterrows():
-                # 传入真实的成交额用于后续绘图线宽
-                target_stocks_list.append((row['代码'], row['名称'], row['成交额'])) 
-            
-            # 循环获取所有目标日期的数据并合并
-            all_intraday_data = [] # List of results
-            
-            # 自动调整数据精度策略
-            # 1分钟线通常只能获取最近5天
-            # 5分钟线通常能获取最近1-2个月
-            period_to_use = '1'
-            if len(target_dates) > 5 and playback_mode == "多日走势拼接":
-                period_to_use = '5'
-                st.info(f"ℹ️ 您选择了 {len(target_dates)} 天：系统自动切换至【5分钟级】数据，以支持查看更久远的历史走势。")
-            elif len(target_dates) > 10:
-                 st.toast(f"⚠️ 您选择了 {len(target_dates)} 天的数据，加载可能较慢，请耐心等待...")
-            
-            target_dates_to_fetch = target_dates
-
-            for i, d_date in enumerate(target_dates_to_fetch):
-                fetch_progress.progress((i + 1) / len(target_dates_to_fetch))
                 d_str = d_date.strftime("%Y-%m-%d")
-                
-                # 获取该日所有数据
                 day_results = fetch_intraday_data_v2(target_stocks_list, d_str, period=period_to_use)
                 
-                # 为数据添加 'date_str' 标识
                 for res in day_results:
                      res['data']['date_col'] = d_str
                      res['real_date'] = d_date
                 
                 all_intraday_data.extend(day_results)
-            
-        # 清除进度条 (移出 spinner 外部)
-        progress_placeholder.empty()
+        
+        # 数据拉取完毕后，彻底清空进度区域
+        progress_area.empty()
             
         if not all_intraday_data:
             st.warning("未能获取到分时数据")
