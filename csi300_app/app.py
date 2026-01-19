@@ -11,6 +11,13 @@ import concurrent.futures
 import threading
 import sys
 
+# 尝试导入 Streamlit 上下文管理器，用于解决多线程 "missing ScriptRunContext" 警告
+try:
+    from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+except ImportError:
+    # 兼容旧版本 Streamlit
+    from streamlit.scriptrunner import add_script_run_ctx, get_script_run_ctx
+
 # 配置页面信息
 st.set_page_config(
     page_title="A股历史盘面回放系统",
@@ -135,7 +142,7 @@ def fetch_history_data():
                      spot_df['代码'] = spot_df['代码'].astype(str)
                      today_spot_map = spot_df.set_index('代码').to_dict('index')
              except Exception as e:
-                 print(f"Spot fetch failed: {e}")
+                 print(f"实时数据拉取失败: {e}")
 
         # 循环获取历史
         # 使用 ThreadPoolExecutor 加速增量历史下载 (如果需要下载很多天)
@@ -193,8 +200,14 @@ def fetch_history_data():
 
         # 如果是增量只差1天，其实单线程也快。如果是初始化，并发。
         # Use concurrency
+        ctx = get_script_run_ctx()
+        def fetch_one_stock_wrapper(code, name):
+            if ctx:
+                add_script_run_ctx(threading.current_thread(), ctx)
+            return fetch_one_stock(code, name)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-             future_map = {executor.submit(fetch_one_stock, c, stock_names.get(c, c)): c for c in stock_list}
+             future_map = {executor.submit(fetch_one_stock_wrapper, c, stock_names.get(c, c)): c for c in stock_list}
              
              for i, future in enumerate(concurrent.futures.as_completed(future_map)):
                  # Update progress
@@ -290,7 +303,7 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
             if df is not None and not df.empty:
                 # 成功 - 重置退避
                 if fetch_cached_min_data.current_backoff > 0:
-                     print(f"[{datetime.now().time()}] API Recovered. Resetting backoff.")
+                     print(f"[{datetime.now().time()}] API 恢复。重置退避时间。")
                      fetch_cached_min_data.current_backoff = 0
 
                 # 统一列名
@@ -338,7 +351,7 @@ def background_prefetch_task(date_list, origin_df):
     后台线程：执行数据预取。
     """
     total_dates = len(date_list)
-    print(f"\n[Background Worker] Started prefetch for {total_dates} days.")
+    print(f"\n[后台任务] 开始预取 {total_dates} 天的数据。")
     
     current_backoff = 0 # 秒
     
@@ -346,7 +359,7 @@ def background_prefetch_task(date_list, origin_df):
     
     for i, d in enumerate(date_list):
         d_str = d.strftime("%Y-%m-%d")
-        print(f"[Background Worker] Processing: {d_str} ({i+1}/{total_dates})")
+        print(f"[后台任务] 正在处理: {d_str} ({i+1}/{total_dates})")
         
         # 筛选
         daily = origin_df[origin_df['日期'].dt.date == d]
@@ -371,7 +384,7 @@ def background_prefetch_task(date_list, origin_df):
                 try:
                     # 检查退避
                     if current_backoff > 0:
-                        print(f"[Background Worker] In cool-down state. Waiting {current_backoff} seconds...")
+                        print(f"[后台任务] 处于冷却状态。等待 {current_backoff} 秒...")
                         time.sleep(current_backoff)
                         
                     # 尝试拉取 (fetch_cached_min_data 内部有缓存，如果已存在会直接返回)
@@ -386,7 +399,7 @@ def background_prefetch_task(date_list, origin_df):
                     
                     # Success
                     if current_backoff > 0:
-                        print(f"[Background Worker] Recovered. Resetting backoff.")
+                        print(f"[后台任务] 已恢复。重置退避时间。")
                         current_backoff = 0
                     
                     # 拉取成功后稍微 sleep 一下避免过于频繁 (0.1s)
@@ -394,17 +407,17 @@ def background_prefetch_task(date_list, origin_df):
                     break # 跳出 while，处理下一个 task
 
                 except Exception as e:
-                    print(f"[Background Worker] Error fetching {t_code} on {t_date}: {e}")
+                    print(f"[后台任务] 获取 {t_code} ({t_date}) 失败: {e}")
                     # 触发退避机制
                     if current_backoff == 0:
                         current_backoff = 60
                     else:
                         current_backoff *= 2
                     
-                    print(f"[Background Worker] Backoff increased to {current_backoff}s. Retrying same task...")
+                    print(f"[后台任务] 退避时间增加到 {current_backoff}秒。正在重试同一任务...")
                     # Loop continues, will sleep at start of next iteration
     
-    print("[Background Worker] All tasks completed.")
+    print("[后台任务] 所有任务已完成。")
 
 
 def fetch_intraday_data_v2(stock_codes, target_date_str, period='1'):
@@ -461,8 +474,14 @@ def fetch_intraday_data_v2(stock_codes, target_date_str, period='1'):
 
     # 并发执行
     # 线程数不宜过多，以免触发反爬限制，10-20左右较为安全
+    ctx = get_script_run_ctx()
+    def _worker_wrapper(t):
+        if ctx:
+            add_script_run_ctx(threading.current_thread(), ctx)
+        return _worker(t)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
-        future_to_task = {executor.submit(_worker, t): t for t in tasks}
+        future_to_task = {executor.submit(_worker_wrapper, t): t for t in tasks}
         
         for future in concurrent.futures.as_completed(future_to_task):
             res = future.result()
@@ -563,6 +582,7 @@ with st.sidebar:
                         name="PrefetchWorker",
                         daemon=True
                     )
+                    add_script_run_ctx(t)
                     t.start()
                     st.rerun()
                 else:
@@ -697,7 +717,9 @@ if not origin_df.empty:
     with col_mode:
         chart_mode = st.radio("选股模式", ["成交额 Top (活跃度)", "指数贡献 Top (影响大盘)"], horizontal=True)
     with col_num:
-        top_n = st.number_input("标的数量", min_value=5, max_value=50, value=20, step=5, help="成交额模式下为总数；指数贡献模式下为沪/深各取 N 个")
+        # 添加 key 避免 Bad setIn index 错误，并强制重置状态
+        top_n = st.number_input("标的数量", min_value=5, max_value=50, value=20, step=5, 
+                               help="沪/深各取 N 个标的（即总数为 2N）", key="top_n_stocks_input")
 
     st.caption(f"注：这里的排名是基于 **{selected_date}** 当日的数据计算的。如果是多日模式，则展示这些股票在过去几天的走势。")
     st.caption("注：指数贡献 = 涨跌幅 × 权重(近似为成交额/市值占比)。此模式能看到是谁在拉动或砸盘。")
@@ -705,29 +727,34 @@ if not origin_df.empty:
     show_intraday = st.checkbox("加载分时走势 (需从网络实时拉取)", value=False)
     
     if show_intraday:
+        # 使用 placeholder 放置进度条，避免组件销毁导致的索引错乱
+        progress_placeholder = st.empty()
+        fetch_progress = progress_placeholder.progress(0)
+
         with st.spinner(f"正在拉取 {len(target_dates)} 天的分钟线数据 (范围: {target_dates[0]} ~ {target_dates[-1]})..."):
             
+            # 统一选股逻辑：无论是成交额还是指数贡献，都按沪深分别取 Top N
             if "成交额" in chart_mode:
-                # 成交额最高 Top N
-                top_stocks_df = daily_df.sort_values('成交额', ascending=False).head(top_n)
+                sort_col = '成交额'
             else:
-                # 新逻辑：指数贡献度 (上海 Top N + 深圳 Top N)
-                # Impact = abs(涨跌幅 * 成交额) 
+                # 指数贡献度 Impact = abs(涨跌幅 * 成交额) 
                 daily_df['abs_impact'] = (daily_df['涨跌幅'] * daily_df['成交额']).abs()
+                sort_col = 'abs_impact'
                 
-                # 分别筛选沪市和深市
-                sh_pool = daily_df[daily_df['代码'].astype(str).str.startswith('6')].copy()
-                sz_pool = daily_df[~daily_df['代码'].astype(str).str.startswith('6')].copy()
-                
-                sh_top = sh_pool.sort_values('abs_impact', ascending=False).head(top_n)
-                sz_top = sz_pool.sort_values('abs_impact', ascending=False).head(top_n)
-                
-                top_stocks_df = pd.concat([sh_top, sz_top], ignore_index=True)
+            # 分别筛选沪市和深市
+            sh_pool = daily_df[daily_df['代码'].astype(str).str.startswith('6')].copy()
+            sz_pool = daily_df[~daily_df['代码'].astype(str).str.startswith('6')].copy()
+            
+            sh_top = sh_pool.sort_values(sort_col, ascending=False).head(top_n)
+            sz_top = sz_pool.sort_values(sort_col, ascending=False).head(top_n)
+            
+            top_stocks_df = pd.concat([sh_top, sz_top], ignore_index=True)
 
             # 准备参数列表
             target_stocks_list = []
             for _, row in top_stocks_df.iterrows():
-                target_stocks_list.append((row['代码'], row['名称'], 0)) # Turnover temporarily 0, unused in fetch
+                # 传入真实的成交额用于后续绘图线宽
+                target_stocks_list.append((row['代码'], row['名称'], row['成交额'])) 
             
             # 循环获取所有目标日期的数据并合并
             all_intraday_data = [] # List of results
@@ -744,19 +771,11 @@ if not origin_df.empty:
             
             target_dates_to_fetch = target_dates
 
-            # 进度条
-            fetch_progress = st.progress(0)
-            
             for i, d_date in enumerate(target_dates_to_fetch):
                 fetch_progress.progress((i + 1) / len(target_dates_to_fetch))
                 d_str = d_date.strftime("%Y-%m-%d")
                 
                 # 获取该日所有数据
-                # 注意：turnover 需要传入该日实际的 turnover，这里我们做一个简化：
-                # 依然用 fetch_intraday_data_v2，但它返回的 turnover 是输入参数。
-                # 实际上画图时我们希望线宽随【当日】成交额变化？或者保持一致？
-                # 如果是多日拼接，建议线宽固定或取平均。简单起见，线宽使用最后一天的成交额定级。
-                
                 day_results = fetch_intraday_data_v2(target_stocks_list, d_str, period=period_to_use)
                 
                 # 为数据添加 'date_str' 标识
@@ -766,11 +785,12 @@ if not origin_df.empty:
                 
                 all_intraday_data.extend(day_results)
             
-            fetch_progress.empty()
+        # 清除进度条 (移出 spinner 外部)
+        progress_placeholder.empty()
             
-            if not all_intraday_data:
-                st.warning("未能获取到分时数据")
-            else:
+        if not all_intraday_data:
+            st.warning("未能获取到分时数据")
+        else:
                 # --- 数据重组 ---
                 # 将分散的数据合并为： { 'code': { 'name':..., 'is_index':..., 'full_data': DataFrame } }
                 combined_series = {}
