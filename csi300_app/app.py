@@ -123,6 +123,17 @@ def fetch_history_data():
         stock_list = cons_df[code_col].tolist()
         stock_names = dict(zip(cons_df[code_col], cons_df[name_col]))
         
+        # --- 尝试获取今日实时数据 (Spot) 修改股票名称 ---
+        try:
+             spot_df = ak.stock_zh_a_spot_em()
+             if spot_df is not None and not spot_df.empty:
+                 # 更新名称映射
+                 spot_df['代码'] = spot_df['代码'].astype(str)
+                 new_names = dict(zip(spot_df['代码'], spot_df['名称']))
+                 stock_names.update(new_names)
+        except Exception as e:
+             print(f"Update stock names failed: {e}")
+
         new_data_list = []
         total_stocks = len(stock_list)
         
@@ -247,6 +258,11 @@ def fetch_history_data():
             return pd.DataFrame()
 
         final_df = final_df.sort_values('日期')
+        
+        # 使用最新的 stock_names 更新 DataFrame 中的名称列
+        if final_df is not None and not final_df.empty:
+            # 只更新存在的代码
+            final_df['名称'] = final_df['代码'].map(stock_names).fillna(final_df['名称'])
         
         # 只有当有新数据 或者 是首次下载时，才保存
         if new_data_list or cached_df.empty:
@@ -754,8 +770,12 @@ if not origin_df.empty:
         period_to_use = '1'
         
         if len(target_dates) > 5 and playback_mode == "多日走势拼接":
-            period_to_use = '5'
-            st.info(f"ℹ️ 您选择了 {len(target_dates)} 天：系统自动切换至【5分钟级】数据。")
+            if len(target_dates) > 30:
+                period_to_use = '15' # 超过30天使用15分钟线
+                st.info(f"ℹ️ 您选择了 {len(target_dates)} 天：系统自动切换至【15分钟级】数据。")
+            else:
+                period_to_use = '5'
+                st.info(f"ℹ️ 您选择了 {len(target_dates)} 天：系统自动切换至【5分钟级】数据。")
         elif len(target_dates) > 10:
              st.toast(f"⚠️ 您选择了 {len(target_dates)} 天的数据，加载可能较慢，请耐心等待...")
         
@@ -902,20 +922,27 @@ if not origin_df.empty:
                     
                     info['plot_data'] = full_df
                 
-                # 生成 X 轴标签 (只显示每天的 9:30, 10:30, 11:30/13:00, 14:00, 15:00)
-                # 或者只显示日期 + 关键点
+                # 生成 X 轴标签
                 for i, d_str in enumerate(days_list):
                     base_x = i * (240 + 20)
                     day_label = d_str[5:] # MM-DD
-                    # 09:30
-                    x_tick_vals.append(base_x)
-                    x_tick_text.append(f"{day_label}\n09:30")
-                    # 11:30
-                    x_tick_vals.append(base_x + 120)
-                    x_tick_text.append("11:30/13:00")
-                    # 15:00
-                    x_tick_vals.append(base_x + 240)
-                    x_tick_text.append("15:00")
+                    
+                    if len(days_list) > 1:
+                        # 多日模式：只显示日期在中间 或者 开头
+                        # 为了简洁，只在每天的中间显示一个日期
+                        x_tick_vals.append(base_x + 120) 
+                        x_tick_text.append(day_label)
+                    else:
+                        # 单日模式：显示详细时间点
+                        # 09:30
+                        x_tick_vals.append(base_x)
+                        x_tick_text.append(f"{day_label}\n09:30")
+                        # 11:30
+                        x_tick_vals.append(base_x + 120)
+                        x_tick_text.append("11:30/13:00")
+                        # 15:00
+                        x_tick_vals.append(base_x + 240)
+                        x_tick_text.append("15:00")
 
                 # 分类
                 idx_data = [v for k,v in combined_series.items() if v['is_index']]
