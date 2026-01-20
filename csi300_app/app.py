@@ -1136,12 +1136,9 @@ if not origin_df.empty:
                     tab1, tab2 = st.tabs(["沪市 (SH)", "深市 (SZ)"])
                     
                     with tab1:
-                        st.plotly_chart(plot_intraday_v3(sh_stocks, sh_index, "沪市权重股"), use_container_width=True)
-                    with tab2:
-                        st.plotly_chart(plot_intraday_v3(sz_stocks, sz_index, "深市权重股"), use_container_width=True)
-
-
-        st.divider()
+                    st.plotly_chart(plot_intraday_v3(sh_stocks, sh_index, f"沪市 - {chart_mode}"), use_container_width=True)
+                with tab2:
+                    st.plotly_chart(plot_intraday_v3(sz_stocks, sz_index, f"深市 - {chart_mode}"), use_container_width=True)
         
         # --- 可视化 ---
         st.subheader(f"📊 {selected_date.strftime('%Y年%m月%d日')} 市场全景热力图")
