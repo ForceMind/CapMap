@@ -55,6 +55,7 @@ def get_start_date(years_back=2):
 def fetch_history_data(pool_name="沪深300 (大盘)"):
     """
     获取指定成分股过去2年的日线数据。
+    逻辑复刻自 app1.py (稳定版)，支持多指数池。
     """
     config = STOCK_POOLS.get(pool_name, STOCK_POOLS["沪深300 (大盘)"])
     cache_file = config["cache"]
@@ -63,52 +64,54 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
     cached_df = pd.DataFrame()
     last_cached_date = None
 
-    cached_df = pd.DataFrame()
     # 1. 尝试加载本地缓存
-    last_dates_map = {}
     if os.path.exists(cache_file):
         try:
             cached_df = pd.read_parquet(cache_file)
             if not cached_df.empty:
-                # 确保代码列是字符串
-                cached_df['代码'] = cached_df['代码'].astype(str)
-                # 计算每只股票的最新日期，用于增量更新
-                last_dates_map = cached_df.groupby('代码')['日期'].max().dt.date.to_dict()
-                
-                overall_latest = cached_df['日期'].max().date()
-                st.toast(f"✅ 已加载本地缓存 [{pool_name}]，最新日期: {overall_latest}")
+                last_cached_date = cached_df['日期'].max().date()
+                st.toast(f"✅ 已加载本地缓存 [{pool_name}]，最新日期: {last_cached_date}")
         except Exception as e:
             st.error(f"读取缓存文件失败: {e}")
 
-    # 2. 准备日期参数
+    # 2. 计算需要下载的时间范围
     today = datetime.now().date()
+    
+    if last_cached_date:
+        if last_cached_date >= today:
+             return cached_df
+        start_date_str = (last_cached_date + timedelta(days=1)).strftime("%Y%m%d")
+    else:
+        start_date_str = get_start_date(2)
+        
     end_date_str = today.strftime("%Y%m%d")
-    default_start_date_str = get_start_date(2)
+
+    # 如果不需要更新
+    if start_date_str > end_date_str:
+        return cached_df
 
     # 状态容器
     status_text = st.empty()
     progress_bar = st.progress(0)
     
     try:
-        # 初始提示
-        if cached_df.empty:
+        # 如果是增量更新
+        is_incremental = not cached_df.empty
+        if not is_incremental:
             status_text.text(f"正在初始化 [{pool_name}] 历史数据...")
         else:
-            status_text.text(f"正在检查 [{pool_name}] 增量数据 ({end_date_str})...")
+            status_text.text(f"正在检查增量数据 ({start_date_str} - {end_date_str})...")
 
         # 获取成分股列表
-        status_text.text(f"正在获取 [{pool_name}] 成分股列表...")
         try:
-            # 增加重试
-            cons_df = with_retry(lambda: ak.index_stock_cons(symbol=index_code), retries=5, delay=2.0)
+            cons_df = ak.index_stock_cons(symbol=index_code)
         except:
              if not cached_df.empty:
-                 st.warning("成分股列表获取失败 (网络原因)，使用缓存数据")
+                 st.warning("成分股列表获取失败，使用缓存数据")
                  return cached_df
              return pd.DataFrame()
         
         if cons_df is None or cons_df.empty:
-             st.warning(f"无法获取 [{pool_name}] 成分股列表 (可能是 AkShare 接口变动或网络超时)")
              return cached_df if not cached_df.empty else pd.DataFrame()
 
         if 'variety' in cons_df.columns:
@@ -119,57 +122,73 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
             code_col = cons_df.columns[0]
             name_col = cons_df.columns[1]
             
-        stock_list = cons_df[code_col].apply(str).tolist() # 强转String
-        stock_names = dict(zip(stock_list, cons_df[name_col]))
+        stock_list = cons_df[code_col].tolist()
+        stock_names = dict(zip(cons_df[code_col], cons_df[name_col]))
         
-        # --- 移除 stock_zh_a_spot_em 调用 ---
-        # 原因：获取全市场实时数据过于沉重，容易导致IP被Short Ban，从而影响后续历史数据获取
-        # "Previous Version" 没有这一步也能正常运行。
-        today_spot_map = {} 
+        # --- 尝试获取今日实时数据 (Spot) ---
+        today_spot_map = {}
+        try:
+             # 注意：对于全市场5000只股票，频繁调用可能被限制，但 app1.py 中证明在低频下可用
+             spot_df = ak.stock_zh_a_spot_em()
+             if spot_df is not None and not spot_df.empty:
+                 spot_df['代码'] = spot_df['代码'].astype(str)
+                 
+                 # 1. 更新名称映射
+                 new_names = dict(zip(spot_df['代码'], spot_df['名称']))
+                 stock_names.update(new_names)
+                 
+                 # 2. 准备今日数据映射
+                 if end_date_str >= start_date_str:
+                    today_spot_map = spot_df.set_index('代码').to_dict('index')
+
+        except Exception as e:
+             # 非致命错误
+             print(f"Update spots failed: {e}")
 
         new_data_list = []
         total_stocks = len(stock_list)
 
-        # 循环获取历史 (Per-Stock Logic)
+        # 循环获取历史
+        # 这里复刻 app1.py 的多线程逻辑
         
         def fetch_one_stock(code, name):
-            # 智能判断每只股票的开始日期
-            last_dt = last_dates_map.get(code)
-            
-            if last_dt:
-                # 如果这个股票缓存日期已经是今天，跳过
-                if last_dt >= today:
-                    return None
-                cur_start_str = (last_dt + timedelta(days=1)).strftime("%Y%m%d")
-            else:
-                # 如果缓存里没这个股票（新入成分股 or 缓存空），拉2年
-                cur_start_str = default_start_date_str
-            
-            # 如果不需要更新
-            if cur_start_str > end_date_str:
-                return None
-
-            # 加上随机等待，缓解服务端并发压力 (防止 RemoteDisconnected)
-            time.sleep(random.uniform(0.1, 0.5))
-
             try:
-                # 获取日线 (带重试 - 增强版)
-                # 针对 RemoteDisconnected 错误，增加重试次数
-                df_hist = with_retry(
-                    lambda: ak.stock_zh_a_hist(symbol=code, start_date=cur_start_str, end_date=end_date_str, adjust="qfq"),
-                    retries=10, delay=1.0 # 增加重试次数，减少delay以便快速恢复
-                )
+                # 获取日线
+                df_hist = ak.stock_zh_a_hist(symbol=code, start_date=start_date_str, end_date=end_date_str, adjust="qfq")
                 
-                # 不需要人工补全今天的数据 (Today Spot Patching Removed)
-                # 如果 akshare hist 接口包含今天就包含，不包含就算了，保持稳定最重要。
+                # 检查是否包含今天
+                fetched_today = False
+                if df_hist is not None and not df_hist.empty:
+                    df_hist['日期'] = pd.to_datetime(df_hist['日期'])
+                    if end_date_str in df_hist['日期'].dt.strftime("%Y%m%d").values:
+                        fetched_today = True
+                else:
+                    df_hist = pd.DataFrame()
+
+                # 补全今天
+                if (not fetched_today) and (end_date_str == datetime.now().strftime("%Y%m%d")):
+                    if code in today_spot_map:
+                        row = today_spot_map[code]
+                        try:
+                             new_row = pd.DataFrame([{
+                                 '日期': pd.to_datetime(end_date_str),
+                                 '收盘': row['最新价'],
+                                 '涨跌幅': row['涨跌幅'],
+                                 '成交额': row['成交额'],
+                                 '代码': code,
+                                 '名称': name
+                             }])
+                             df_hist = pd.concat([df_hist, new_row], ignore_index=True)
+                        except:
+                            pass
                 
                 if df_hist is not None and not df_hist.empty:
                     # 确保列存在
                     if '日期' not in df_hist.columns: return None
                     cols_needed = ['日期', '收盘', '涨跌幅', '成交额']
-                    available_cols = [c for c in cols_needed if c in df_hist.columns]
-                    if len(available_cols) < len(cols_needed): return None
-
+                    for c in cols_needed:
+                        if c not in df_hist.columns: return None
+                    
                     df_hist = df_hist[cols_needed].copy()
                     df_hist['代码'] = code
                     df_hist['名称'] = name
@@ -178,17 +197,26 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
                 pass
             return None
 
-        # 改回单线程循环，确保最大稳定性
-        # 既然 akshare 接口不稳定，单线程虽然慢但是最稳的
-        for i, code in enumerate(stock_list):
-            # Update progress
-            if i % 5 == 0:
-                progress_bar.progress((i + 1) / total_stocks)
-                status_text.text(f"正在同步数据: {i+1}/{total_stocks} ({code})")
-            
-            res = fetch_one_stock(code, stock_names.get(code, code))
-            if res is not None:
-                new_data_list.append(res)
+        # Use concurrency as in app1.py
+        ctx = get_script_run_ctx()
+        def fetch_one_stock_wrapper(code, name):
+            if ctx:
+                add_script_run_ctx(threading.current_thread(), ctx)
+            return fetch_one_stock(code, name)
+
+        # 恢复 app1.py 的 max_workers=10
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+             future_map = {executor.submit(fetch_one_stock_wrapper, c, stock_names.get(c, c)): c for c in stock_list}
+             
+             for i, future in enumerate(concurrent.futures.as_completed(future_map)):
+                 # Update progress
+                 if i % 10 == 0:
+                     progress_bar.progress((i + 1) / total_stocks)
+                     status_text.text(f"正在同步数据 [{pool_name}]: {i+1}/{total_stocks}")
+                 
+                 res = future.result()
+                 if res is not None:
+                     new_data_list.append(res)
                 
         status_text.empty()
         progress_bar.empty()
@@ -206,12 +234,10 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
                 final_df = new_df
             else:
                 # 合并旧数据和新数据，并去重
-                st.toast(f"📥 成功获取 {len(new_df)} 条新记录")
+                st.toast(f"📥 成功获取 {len(new_df)} 条新记录 ({pool_name})")
                 final_df = pd.concat([cached_df, new_df], ignore_index=True)
-                # 按 '日期' + '代码' 去重，保留新的（如果重叠）
                 final_df.drop_duplicates(subset=['日期', '代码'], keep='last', inplace=True)
         else:
-            # 没下载到新数据（可能是假期）
             final_df = cached_df
             
         if final_df.empty:
@@ -221,10 +247,9 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
         
         # 使用最新的 stock_names 更新 DataFrame 中的名称列
         if final_df is not None and not final_df.empty:
-            # 只更新存在的代码
             final_df['名称'] = final_df['代码'].map(stock_names).fillna(final_df['名称'])
         
-        # 只有当有新数据 或者 是首次下载时，才保存
+        # 保存缓存
         if new_data_list or cached_df.empty:
             try:
                 if not os.path.exists("data"):
@@ -566,10 +591,6 @@ for t in threading.enumerate():
 # 更新 Sidebar UI
 with st.sidebar:
     st.markdown("---")
-    
-    # 导航栏
-    nav_option = st.radio("📡 功能导航", ["⏪ 历史盘面回放", "🌊 资金偏离分析"], index=0)
-    
     with st.expander("📥 后台数据预取", expanded=False):
         st.caption("后台静默下载最近 N 天分时数据")
         prefetch_days = st.number_input("预取天数", min_value=5, max_value=200, value=30, step=10)
@@ -612,7 +633,6 @@ if not origin_df.empty:
     # --- 时间选择器逻辑 (Session State 管理) ---
     available_dates = sorted(df['日期'].dt.date.unique())
     
-    if nav_option == "⏪ 历史盘面回放":
         if 'selected_date_idx' not in st.session_state:
             st.session_state.selected_date_idx = len(available_dates) - 1
 
@@ -674,7 +694,6 @@ if not origin_df.empty:
             
             target_dates = [available_dates[st.session_state.selected_date_idx]] # 使用 state 中的日期
             selected_date = target_dates[0]
-            display_date_str = selected_date.strftime("%Y-%m-%d")
             
         else: # 多日走势拼接
             with mode_col2:
@@ -694,113 +713,31 @@ if not origin_df.empty:
                     target_dates = [available_dates[-1]]
                 
                 st.info(f"已选择 {len(target_dates)} 个交易日进行拼接展示")
-                selected_date = target_dates[-1] # 用于下方显示统计面板的基准 (兼容旧代码变量名)
-                display_date_str = f"{target_dates[0].strftime('%Y%m%d')} ~ {target_dates[-1].strftime('%Y%m%d')}"
+            selected_date = target_dates[-1] # 用于下方显示统计面板的基准
             else:
                 st.warning("请选择完整的开始和结束日期")
                 target_dates = [available_dates[-1]]
                 selected_date = available_dates[-1]
-                display_date_str = selected_date.strftime("%Y-%m-%d")
 
-        # --- 数据切片与统计 (兼容单日与多日) ---
-        if len(target_dates) == 1:
-            # 单日逻辑
+    # --- 数据切片与统计 (以最后一天或选中日为准) ---
             daily_df = df[df['日期'].dt.date == selected_date].copy()
+    
             if daily_df.empty:
-                st.warning(f"{selected_date} 当日无交易数据。")
-                st.stop()
-                
+        st.warning(f"{selected_date} 当日无交易数据（可能是非交易日或数据缺失）。")
+    else:
+        # 当日统计指标
             median_chg = daily_df['涨跌幅'].median()
-            total_turnover = daily_df['成交额'].sum() / 1e8 
+        total_turnover = daily_df['成交额'].sum() / 1e8 # 亿元
             top_gainer = daily_df.loc[daily_df['涨跌幅'].idxmax()]
-            
-            metric_label_date = "当前回放日期"
-            metric_label_chg = "成分股中位数涨跌"
-            metric_label_to = "成分股总成交"
-            
-        else:
-            # 多日逻辑 (计算累计)
-            # 1. 筛选出范围内所有数据
-            start_date_ts = pd.Timestamp(target_dates[0])
-            end_date_ts = pd.Timestamp(target_dates[-1])
-            
-            period_df = df[(df['日期'] >= start_date_ts) & (df['日期'] <= end_date_ts)].copy()
-            
-            if period_df.empty:
-                st.stop()
-                
-            # 2. 计算区间累计涨跌幅
-            # 方法: 对每个代码，找到首尾价格
-            # 注意: 如果只用 period_df，首日的数据里的 '收盘' 是首日的收盘价。
-            # 区间涨幅 = (End_Close - Start_Close) / Start_Close ? 
-            # 或者更精确：Start_Close 应该是 Start_Date 的 前一日收盘价 (即 Start_Open / (1+Start_Chg))?
-            # 简化起见，我们用 (End_Date Close - Start_Date Open) / Start_Date Open
-            # 这样能包含 Start_Date 当天的涨跌
-            
-            agg_stats = []
-            
-            # 使用 groupby 加速
-            grouped = period_df.groupby('代码')
-            
-            for code, group in grouped:
-                group = group.sort_values('日期')
-                if group.empty: continue
-                
-                first_row = group.iloc[0]
-                last_row = group.iloc[-1]
-                
-                # 推算首日开盘价 = 收盘 / (1 + chg/100)
-                # 这种反推如果是涨停板复权可能微小误差，但够用。
-                # 也可以直接用 akshare 下载的 Open，但这里只有 Close/Chg
-                # 假设 Chg 是精确的
-                try:
-                    start_open = first_row['收盘'] / (1 + first_row['涨跌幅']/100)
-                    end_close = last_row['收盘']
-                    
-                    period_chg = (end_close - start_open) / start_open * 100
-                    period_turnover = group['成交额'].sum()
-                    
-                    agg_stats.append({
-                        '代码': code,
-                        '名称': first_row['名称'], # 假设没改名
-                        '区间涨跌幅': period_chg,
-                        '区间总成交': period_turnover
-                    })
-                except:
-                    pass
-            
-            agg_df = pd.DataFrame(agg_stats)
-            
-            if agg_df.empty:
-                st.warning("区间数据计算异常")
-                st.stop()
-                
-            median_chg = agg_df['区间涨跌幅'].median()
-            total_turnover = period_df['成交额'].sum() / 1e8
-            top_gainer = agg_df.loc[agg_df['区间涨跌幅'].idxmax()]
-            
-            # 为了兼容后续 daily_df 的使用 (Treemap 和 选股)
-            # 我们需要构造一个 "Proxy Daily DF"
-            # 让后面的选股逻辑基于 "区间表现"
-            daily_df = agg_df.rename(columns={'区间涨跌幅': '涨跌幅', '区间总成交': '成交额'}).copy()
-            # 补齐其他字段
-            # 收盘价用最后一天的
-            # daily_df 还需要 '收盘' 用于展示? Treemap hover 需要
-            # 我们可以 join 回去，但 Treemap hover 也可以只展示涨跌
-            daily_df['收盘'] = 0 # Placeholder
-            
-            metric_label_date = "当前回放区间"
-            metric_label_chg = "区间涨跌幅中位数"
-            metric_label_to = "区间总成交"
+        top_loser = daily_df.loc[daily_df['涨跌幅'].idxmin()]
 
         # 显示指标行
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric(metric_label_date, display_date_str)
-        col2.metric(metric_label_chg, f"{median_chg:.2f}%", 
-                    delta=f"{median_chg:.2f}%", delta_color="normal")
-        col3.metric(metric_label_to, f"{total_turnover:.1f} 亿")
-        col4.metric("领涨龙头", f"{top_gainer['名称']} ({'涨跌幅' in top_gainer and top_gainer['涨跌幅'] or top_gainer.get('区间涨跌幅'):.2f}%)")
-
+        col1.metric("当前回放日期", selected_date.strftime("%Y-%m-%d"))
+        col2.metric("成分股中位数涨跌", f"{median_chg:.2f}%", 
+                    delta=f"{median_chg:.2f}%", delta_color="normal") # A股习惯需结合 Streamlit theme, 用 normal 需自行脑补红绿
+        col3.metric("成分股总成交", f"{total_turnover:.1f} 亿")
+        col4.metric("领涨龙头", f"{top_gainer['名称']} ({top_gainer['涨跌幅']:.2f}%)")
         # --- 新增功能：分时走势叠加 ---
         st.markdown("---")
         st.subheader("📈 核心资产分时走势叠加")

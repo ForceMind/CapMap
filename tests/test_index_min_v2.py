@@ -2,26 +2,29 @@ import akshare as ak
 
 print("Testing symbols...")
 try:
-	print("Try 1: symbol='000300'")
-	df = ak.stock_zh_a_hist_min_em(symbol="000300", period="1", adjust="qfq", start_date="2024-01-08 09:30:00", end_date="2024-01-08 15:00:00")
-	if df is not None: print("Success 000300", len(df))
-	else: print("Fail 000300")
+    # 尝试纯数字 000300 (可能会被当做个股，但000300是个股吗？000300是汉王科技吗？不，600300是维维股份，000300没有这个个股)
+    # 000300 是沪深300指数代码
+    print("Try 1: symbol='000300'")
+    df = ak.stock_zh_a_hist_min_em(symbol="000300", period="1", adjust="qfq", start_date="2024-01-08 09:30:00", end_date="2024-01-08 15:00:00")
+    if df is not None: print("Success 000300", len(df))
+    else: print("Fail 000300")
 except Exception as e:
-	print("Error 000300:", e)
+    print("Error 000300:", e)
 
 try:
-	print("Try 2: symbol='sh000300'")
-	df = ak.stock_zh_a_hist_min_em(symbol="sh000300", period="1", adjust="qfq", start_date="2024-01-08 09:30:00", end_date="2024-01-08 15:00:00")
-	if df is not None: print("Success sh000300", len(df))
+    print("Try 2: symbol='sh000300'")
+    df = ak.stock_zh_a_hist_min_em(symbol="sh000300", period="1", adjust="qfq", start_date="2024-01-08 09:30:00", end_date="2024-01-08 15:00:00")
+    if df is not None: print("Success sh000300", len(df))
 except Exception as e:
-	print("Error sh000300:", e)
+    print("Error sh000300:", e)
     
 try:
-	if hasattr(ak, 'index_zh_a_hist_min_em'):
-		print("Found index_zh_a_hist_min_em function!")
-		df = ak.index_zh_a_hist_min_em(symbol="000300", period="1", start_date="2024-01-08 09:30:00", end_date="2024-01-08 15:00:00")
-		if df is not None: print("Success index func", len(df))
-	else:
-		print("No index_zh_a_hist_min_em function")
+    # 查找是否有 index_zh_a_hist_min_em
+    if hasattr(ak, 'index_zh_a_hist_min_em'):
+        print("Found index_zh_a_hist_min_em function!")
+        df = ak.index_zh_a_hist_min_em(symbol="000300", period="1", start_date="2024-01-08 09:30:00", end_date="2024-01-08 15:00:00")
+        if df is not None: print("Success index func", len(df))
+    else:
+        print("No index_zh_a_hist_min_em function")
 except Exception as e:
-	print("Error index func:", e)
+    print("Error index func:", e)

@@ -1,0 +1,450 @@
+diff a/csi300_app/app.py b/csi300_app/app.py	(rejected hunks)
+@@ -480,347 +480,435 @@
+                 return {
+                     'code': task['code'],
+                     'name': task['name'],
+                     'data': data,
+                     'turnover': task['to_val'],
+                     'is_index': is_index
+                 }
+         except Exception:
+             pass
+         return None
+ 
+     # 并发执行
+     # 线程数不宜过多，以免触发反爬限制，10-20左右较为安全
+     ctx = get_script_run_ctx()
+     def _worker_wrapper(t):
+         if ctx:
+             add_script_run_ctx(threading.current_thread(), ctx)
+         return _worker(t)
+ 
+     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+         future_to_task = {executor.submit(_worker_wrapper, t): t for t in tasks}
+         
+         for future in concurrent.futures.as_completed(future_to_task):
+             res = future.result()
+             if res:
+                 results.append(res)
+             
+     return results
+ 
+ # 2. UI 布局
+ # -----------------------------------------------------------------------------
+ 
+ st.title("A股历史盘面回放系统 (沪深300 Market Replay)")
+ 
+ st.markdown("""
+ > 🕹️ **操作指南**：
+ > 1. 等待数据初始化完成（初次运行可能需要 2-3 分钟）。
+ > 2. 拖动下方滑块选择历史日期。
+ > 3. 观察当日盘面的资金流向与热度。
+ """)
+ 
+ # 侧边栏
+ with st.sidebar:
+     st.header("⚙️ 数据管理")
+     
+     with st.expander("数据刷新与维护", expanded=True):
+         st.write("如果数据显示不正确，请尝试以下操作：")
+         
+         # 1. 刷新盘中
+         if st.button("🟢 刷新今日行情 (盘中)"):
+             try:
+                 if os.path.exists(CACHE_FILE):
+                     # 读取并删除今天的记录，强制下次加载时触发增量更新
+                     _df = pd.read_parquet(CACHE_FILE)
+                     _today = datetime.now().date()
+                     # 过滤掉 >= 今天的数据
+                     _df_new = _df[_df['日期'].dt.date < _today]
+                     _df_new.to_parquet(CACHE_FILE)
+                     st.toast("已清除今日缓存，正在重新拉取实时数据...")
+                 st.cache_data.clear() # 即使是分时数据最好也清一下，以防万一
+                 st.rerun()
+             except Exception as e:
+                 st.error(f"操作失败: {e}")
+ 
+         # 2. 清理分时缓存
+         if st.button("🧹 清空分时图缓存"):
+             st.cache_data.clear()
+             st.toast("✅ 所有内存缓存已清空，下次查看分时图将重新下载。")
+ 
+         # 3. 硬重置
+         if st.button("🚨 彻底重置 (删除所有)"):
+             if os.path.exists(CACHE_FILE):
+                 os.remove(CACHE_FILE)
+                 st.toast("已删除本地所有历史数据。")
+             st.cache_data.clear()
+             st.rerun()
+ 
+     st.info("数据源：沪深300成分股 (AkShare)")
+     st.caption("注：方块大小使用'成交额'代替'市值'，\n反映当日交易热度。")
+ 
+     st.markdown("---")
+     st.markdown("### 🛠️ 板块过滤")
+     filter_cyb = st.checkbox("屏蔽创业板 (300开头)", value=False)
+     filter_kcb = st.checkbox("屏蔽科创板 (688开头)", value=False)
+     
+ # 加载数据
+ with st.spinner("正在初始化历史数据仓库..."):
+     origin_df = fetch_history_data()
+ 
+ # --- 后台任务检测与控制 ---
+ # 检查是否有名为 "PrefetchWorker" 的后台线程
+ bg_thread = None
+ for t in threading.enumerate():
+     if t.name == "PrefetchWorker":
+         bg_thread = t
+         break
+ 
+ # 更新 Sidebar UI
+ with st.sidebar:
+     st.markdown("---")
++    
++    # 导航栏
++    nav_option = st.radio("📡 功能导航", ["⏪ 历史盘面回放", "🌊 资金偏离分析"], index=0)
++    
+     with st.expander("📥 后台数据预取", expanded=False):
+         st.caption("后台静默下载最近 N 天分时数据")
+         prefetch_days = st.number_input("预取天数", min_value=5, max_value=200, value=30, step=10)
+         
+         if bg_thread and bg_thread.is_alive():
+             st.info(f"🟢 后台任务运行中...\n请关注控制台(Console)日志")
+             # 无法通过 Button 停止线程，除非使用 Event。暂不实现停止。
+         else:
+             if st.button("🚀 启动后台下载"):
+                 if not origin_df.empty:
+                     # 获取日期列表
+                     all_dates = sorted(origin_df['日期'].dt.date.unique())
+                     target_prefetch_dates = all_dates[-prefetch_days:]
+                     
+                     # 启动线程
+                     t = threading.Thread(
+                         target=background_prefetch_task,
+                         args=(target_prefetch_dates, origin_df),
+                         name="PrefetchWorker",
+                         daemon=True
+                     )
+                     add_script_run_ctx(t)
+                     t.start()
+                     st.rerun()
+                 else:
+                     st.error("历史数据尚未就绪")
+ 
+ if not origin_df.empty:
+     # --- 全局过滤逻辑 ---
+     df = origin_df.copy()
+     if filter_cyb:
+         df = df[~df['代码'].astype(str).str.startswith('300')]
+     if filter_kcb:
+         df = df[~df['代码'].astype(str).str.startswith('688')]
+ 
+     if df.empty:
+         st.warning("过滤后没有剩余股票数据，请取消勾选过滤选项。")
+         st.stop()
+ 
+     # --- 时间选择器逻辑 (Session State 管理) ---
+     available_dates = sorted(df['日期'].dt.date.unique())
+     
++    if nav_option == "⏪ 历史盘面回放":
+         if 'selected_date_idx' not in st.session_state:
+             st.session_state.selected_date_idx = len(available_dates) - 1
+ 
+         #确保索引不越界
+         if st.session_state.selected_date_idx >= len(available_dates):
+             st.session_state.selected_date_idx = len(available_dates) - 1
+         if st.session_state.selected_date_idx < 0:
+             st.session_state.selected_date_idx = 0
+ 
+         # 布局：前一天 | 滑块 | 后一天
+         st.markdown("### 📅 选择回放日期")
+         
+         # 模式选择
+         mode_col1, mode_col2 = st.columns([1, 3])
+         with mode_col1:
+             playback_mode = st.radio("回放模式", ["单日复盘", "多日走势拼接"], horizontal=True)
+ 
+         if playback_mode == "单日复盘":
+             col_prev, col_slider, col_next = st.columns([1, 6, 1])
+             
+             with col_prev:
+                 st.write("") 
+                 st.write("")
+                 if st.button("⬅️ 前一天"):
+                     if st.session_state.selected_date_idx > 0:
+                         st.session_state.selected_date_idx -= 1
+                         st.rerun()
+ 
+             with col_next:
+                 st.write("")
+                 st.write("")
+                 if st.button("后一天 ➡️"):
+                     if st.session_state.selected_date_idx < len(available_dates) - 1:
+                         st.session_state.selected_date_idx += 1
+                         st.rerun()
+ 
+             with col_slider:
+                 # 原 select_slider 替换为 date_input 以支持快速年份选择
+                 current_date_val = available_dates[st.session_state.selected_date_idx]
+                 
+                 picked_date = st.date_input(
+                     "日期",
+                     value=current_date_val,
+                     min_value=available_dates[0],
+                     max_value=available_dates[-1],
+                     label_visibility="collapsed"
+                 )
+                 
+                 # 如果日期发生变化
+                 if picked_date != current_date_val:
+                     if picked_date in available_dates:
+                         st.session_state.selected_date_idx = available_dates.index(picked_date)
+                     else:
+                         # 如果选中的是非交易日，寻找最近的交易日
+                         closest_date = min(available_dates, key=lambda d: abs(d - picked_date))
+                         st.session_state.selected_date_idx = available_dates.index(closest_date)
+                         st.toast(f"📅 休市日，已自动定位到最近交易日: {closest_date}")
+                     st.rerun()
+             
+             target_dates = [available_dates[st.session_state.selected_date_idx]] # 使用 state 中的日期
+             selected_date = target_dates[0]
++            display_date_str = selected_date.strftime("%Y-%m-%d")
+             
+         else: # 多日走势拼接
+             with mode_col2:
+                 date_range = st.date_input(
+                     "选择时间范围 (建议不超过5天，否则加载较慢)",
+                     value=[available_dates[-5] if len(available_dates)>5 else available_dates[0], available_dates[-1]],
+                     min_value=available_dates[0],
+                     max_value=available_dates[-1]
+                 )
+             
+             if len(date_range) == 2:
+                 start_d, end_d = date_range
+                 # 筛选出范围内的交易日
+                 target_dates = [d for d in available_dates if start_d <= d <= end_d]
+                 if not target_dates: # 如果选定的范围内没有交易日 (例如全选了假期)
+                     st.warning("⚠️ 选定范围内无交易数据，已自动重置为最近交易日")
+                     target_dates = [available_dates[-1]]
+                 
+                 st.info(f"已选择 {len(target_dates)} 个交易日进行拼接展示")
+-            selected_date = target_dates[-1] # 用于下方显示统计面板的基准
++                selected_date = target_dates[-1] # 用于下方显示统计面板的基准 (兼容旧代码变量名)
++                display_date_str = f"{target_dates[0].strftime('%Y%m%d')} ~ {target_dates[-1].strftime('%Y%m%d')}"
+             else:
+                 st.warning("请选择完整的开始和结束日期")
+                 target_dates = [available_dates[-1]]
+                 selected_date = available_dates[-1]
++                display_date_str = selected_date.strftime("%Y-%m-%d")
+ 
+-    # --- 数据切片与统计 (以最后一天或选中日为准) ---
++        # --- 数据切片与统计 (兼容单日与多日) ---
++        if len(target_dates) == 1:
++            # 单日逻辑
+             daily_df = df[df['日期'].dt.date == selected_date].copy()
+-    
+             if daily_df.empty:
+-        st.warning(f"{selected_date} 当日无交易数据（可能是非交易日或数据缺失）。")
+-    else:
+-        # 当日统计指标
++                st.warning(f"{selected_date} 当日无交易数据。")
++                st.stop()
++                
+             median_chg = daily_df['涨跌幅'].median()
+-        total_turnover = daily_df['成交额'].sum() / 1e8 # 亿元
++            total_turnover = daily_df['成交额'].sum() / 1e8 
+             top_gainer = daily_df.loc[daily_df['涨跌幅'].idxmax()]
+-        top_loser = daily_df.loc[daily_df['涨跌幅'].idxmin()]
++            
++            metric_label_date = "当前回放日期"
++            metric_label_chg = "成分股中位数涨跌"
++            metric_label_to = "成分股总成交"
++            
++        else:
++            # 多日逻辑 (计算累计)
++            # 1. 筛选出范围内所有数据
++            start_date_ts = pd.Timestamp(target_dates[0])
++            end_date_ts = pd.Timestamp(target_dates[-1])
++            
++            period_df = df[(df['日期'] >= start_date_ts) & (df['日期'] <= end_date_ts)].copy()
++            
++            if period_df.empty:
++                st.stop()
++                
++            # 2. 计算区间累计涨跌幅
++            # 方法: 对每个代码，找到首尾价格
++            # 注意: 如果只用 period_df，首日的数据里的 '收盘' 是首日的收盘价。
++            # 区间涨幅 = (End_Close - Start_Close) / Start_Close ? 
++            # 或者更精确：Start_Close 应该是 Start_Date 的 前一日收盘价 (即 Start_Open / (1+Start_Chg))?
++            # 简化起见，我们用 (End_Date Close - Start_Date Open) / Start_Date Open
++            # 这样能包含 Start_Date 当天的涨跌
++            
++            agg_stats = []
++            
++            # 使用 groupby 加速
++            grouped = period_df.groupby('代码')
++            
++            for code, group in grouped:
++                group = group.sort_values('日期')
++                if group.empty: continue
++                
++                first_row = group.iloc[0]
++                last_row = group.iloc[-1]
++                
++                # 推算首日开盘价 = 收盘 / (1 + chg/100)
++                # 这种反推如果是涨停板复权可能微小误差，但够用。
++                # 也可以直接用 akshare 下载的 Open，但这里只有 Close/Chg
++                # 假设 Chg 是精确的
++                try:
++                    start_open = first_row['收盘'] / (1 + first_row['涨跌幅']/100)
++                    end_close = last_row['收盘']
++                    
++                    period_chg = (end_close - start_open) / start_open * 100
++                    period_turnover = group['成交额'].sum()
++                    
++                    agg_stats.append({
++                        '代码': code,
++                        '名称': first_row['名称'], # 假设没改名
++                        '区间涨跌幅': period_chg,
++                        '区间总成交': period_turnover
++                    })
++                except:
++                    pass
++            
++            agg_df = pd.DataFrame(agg_stats)
++            
++            if agg_df.empty:
++                st.warning("区间数据计算异常")
++                st.stop()
++                
++            median_chg = agg_df['区间涨跌幅'].median()
++            total_turnover = period_df['成交额'].sum() / 1e8
++            top_gainer = agg_df.loc[agg_df['区间涨跌幅'].idxmax()]
++            
++            # 为了兼容后续 daily_df 的使用 (Treemap 和 选股)
++            # 我们需要构造一个 "Proxy Daily DF"
++            # 让后面的选股逻辑基于 "区间表现"
++            daily_df = agg_df.rename(columns={'区间涨跌幅': '涨跌幅', '区间总成交': '成交额'}).copy()
++            # 补齐其他字段
++            # 收盘价用最后一天的
++            # daily_df 还需要 '收盘' 用于展示? Treemap hover 需要
++            # 我们可以 join 回去，但 Treemap hover 也可以只展示涨跌
++            daily_df['收盘'] = 0 # Placeholder
++            
++            metric_label_date = "当前回放区间"
++            metric_label_chg = "区间涨跌幅中位数"
++            metric_label_to = "区间总成交"
+ 
+         # 显示指标行
+         col1, col2, col3, col4 = st.columns(4)
+-        col1.metric("当前回放日期", selected_date.strftime("%Y-%m-%d"))
+-        col2.metric("成分股中位数涨跌", f"{median_chg:.2f}%", 
+-                    delta=f"{median_chg:.2f}%", delta_color="normal") # A股习惯需结合 Streamlit theme, 用 normal 需自行脑补红绿
+-        col3.metric("成分股总成交", f"{total_turnover:.1f} 亿")
+-        col4.metric("领涨龙头", f"{top_gainer['名称']} ({top_gainer['涨跌幅']:.2f}%)")
++        col1.metric(metric_label_date, display_date_str)
++        col2.metric(metric_label_chg, f"{median_chg:.2f}%", 
++                    delta=f"{median_chg:.2f}%", delta_color="normal")
++        col3.metric(metric_label_to, f"{total_turnover:.1f} 亿")
++        col4.metric("领涨龙头", f"{top_gainer['名称']} ({'涨跌幅' in top_gainer and top_gainer['涨跌幅'] or top_gainer.get('区间涨跌幅'):.2f}%)")
++
+         # --- 新增功能：分时走势叠加 ---
+         st.markdown("---")
+         st.subheader("📈 核心资产分时走势叠加")
+         
+         # 模式选择
+         col_mode, col_num = st.columns([3, 1])
+         with col_mode:
+             chart_mode = st.radio("选股模式", ["成交额 Top (活跃度)", "指数贡献 Top (影响大盘)"], horizontal=True)
+         with col_num:
+             # 添加 key 避免 Bad setIn index 错误，并强制重置状态
+             top_n = st.number_input("标的数量", min_value=5, max_value=50, value=20, step=5, 
+                                    help="沪/深各取 N 个标的（即总数为 2N）", key="top_n_stocks_input")
+ 
+         st.caption(f"注：这里的排名是基于 **{selected_date}** 当日的数据计算的。如果是多日模式，则展示这些股票在过去几天的走势。")
+         st.caption("注：指数贡献 = 涨跌幅 × 权重(近似为成交额/市值占比)。此模式能看到是谁在拉动或砸盘。")
+ 
+         show_intraday = st.checkbox("加载分时走势 (需从网络实时拉取)", value=False)
+         
+         if show_intraday:
+             # 使用 placeholder 放置进度条，避免组件销毁导致的索引错乱
+             progress_area = st.empty()
+             
+             # 统一选股逻辑：无论是成交额还是指数贡献，都按沪深分别取 Top N
+             if "成交额" in chart_mode:
+                 sort_col = '成交额'
+             else:
+                 daily_df['abs_impact'] = (daily_df['涨跌幅'] * daily_df['成交额']).abs()
+                 sort_col = 'abs_impact'
+                 
+             sh_pool = daily_df[daily_df['代码'].astype(str).str.startswith('6')].copy()
+             sz_pool = daily_df[~daily_df['代码'].astype(str).str.startswith('6')].copy()
+             
+             sh_top = sh_pool.sort_values(sort_col, ascending=False).head(top_n)
+             sz_top = sz_pool.sort_values(sort_col, ascending=False).head(top_n)
+             
+             top_stocks_df = pd.concat([sh_top, sz_top], ignore_index=True)
+ 
+             target_stocks_list = []
+             for _, row in top_stocks_df.iterrows():
+                 target_stocks_list.append((row['代码'], row['名称'], row['成交额'])) 
+             
+             all_intraday_data = [] 
+             
+             period_to_use = '1'
+             
+             if len(target_dates) > 5 and playback_mode == "多日走势拼接":
+                 if len(target_dates) > 30:
+                     period_to_use = '15' # 超过30天使用15分钟线
+                     st.info(f"ℹ️ 您选择了 {len(target_dates)} 天：系统自动切换至【15分钟级】数据。")
+                 else:
+                     period_to_use = '5'
+                     st.info(f"ℹ️ 您选择了 {len(target_dates)} 天：系统自动切换至【5分钟级】数据。")
+             elif len(target_dates) > 10:
+                  st.toast(f"⚠️ 您选择了 {len(target_dates)} 天的数据，加载可能较慢，请耐心等待...")
+             
+             target_dates_to_fetch = target_dates
+             total_steps = len(target_dates_to_fetch)
+ 
+             # 改回扁平化结构，不再使用 container，减少 DOM 操作层级
+             # 并发线程中缓存的 show_spinner=False 已经设置，这里应该安全了
+             status_text = st.empty()
+             fetch_progress = st.progress(0)
+                  
+             for i, d_date in enumerate(target_dates_to_fetch):
+                 status_text.text(f"🔄 正在获取: {d_date.strftime('%Y-%m-%d')} ({i+1}/{total_steps})...")
+                 fetch_progress.progress((i + 1) / total_steps)
+                 
+                 d_str = d_date.strftime("%Y-%m-%d")
+                 day_results = fetch_intraday_data_v2(target_stocks_list, d_str, period=period_to_use)
+                 
+                 for res in day_results:
+                         res['data']['date_col'] = d_str
+                         res['real_date'] = d_date
+                 
+                 all_intraday_data.extend(day_results)
+             
+             # 数据拉取完毕后，清除进度组件
+             status_text.empty()
+             fetch_progress.empty()
+             # 移除外层占位符的清理，因为已经不再使用
+             progress_area.empty()
+                 
+             if not all_intraday_data:
+                 st.warning("未能获取到分时数据")
+             else:
+                     # --- 数据重组 ---
+                     # 将分散的数据合并为： { 'code': { 'name':..., 'is_index':..., 'full_data': DataFrame } }
+                     combined_series = {}
+                     
+                     for item in all_intraday_data:
+                         code = item['code']
+                         if code not in combined_series:
+                             # 查找该股票在选定日(最后一日)的成交额，用于定线宽
+                             to_val = 0
+                             if not item.get('is_index'):
+                                 matches = daily_df[daily_df['代码'] == code]
+                                 if not matches.empty:
+                                     to_val = matches.iloc[0]['成交额']
+                             
+                             combined_series[code] = {
