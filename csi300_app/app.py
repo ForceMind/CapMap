@@ -29,33 +29,47 @@ st.set_page_config(
 # 1. 核心数据逻辑
 # -----------------------------------------------------------------------------
 
-CACHE_FILE = "data/csi300_history_cache.parquet"
+def with_retry(func, retries=3, delay=1.0, default=None):
+    """通用重试装饰器逻辑"""
+    for i in range(retries):
+        try:
+            return func()
+        except Exception as e:
+            if i == retries - 1:
+                print(f"Failed after {retries} retries: {e}")
+                return default
+            time.sleep(delay * (i + 1)) # 指数退避
+
+# 配置支持的指数池
+STOCK_POOLS = {
+    "沪深300 (大盘)": {"code": "000300", "cache": "data/csi300_history_cache.parquet"},
+    "中证500 (中盘)": {"code": "000905", "cache": "data/csi500_history_cache.parquet"},
+    "中证1000 (小盘)": {"code": "000852", "cache": "data/csi1000_history_cache.parquet"}
+}
 
 def get_start_date(years_back=2):
     """计算 N 年前的日期，返回 YYYYMMDD 字符串"""
     target = datetime.now() - timedelta(days=365 * years_back)
     return target.strftime("%Y%m%d")
 
-def fetch_history_data():
+def fetch_history_data(pool_name="沪深300 (大盘)"):
     """
-    获取沪深300成分股过去2年的日线数据。
-    增量更新逻辑：
-    1. 尝试读取本地缓存。
-    2. 如果有缓存，检查缓存中最新的日期。
-    3. 如果 最新日期 < 昨天 (或今天收盘后)，则只下载增量数据（为了简单可靠，AkShare日线接口通常是按段下载，或者全量下载）。
-       * 修正策略：由于 ak.stock_zh_a_hist 接口参数是 start_date 和 end_date，
-         我们可以只下载 [缓存最新日期+1, 今天] 的数据，然后 append 到缓存中。
+    获取指定成分股过去2年的日线数据。
     """
+    config = STOCK_POOLS.get(pool_name, STOCK_POOLS["沪深300 (大盘)"])
+    cache_file = config["cache"]
+    index_code = config["code"]
+
     cached_df = pd.DataFrame()
     last_cached_date = None
 
     # 1. 尝试加载本地缓存
-    if os.path.exists(CACHE_FILE):
+    if os.path.exists(cache_file):
         try:
-            cached_df = pd.read_parquet(CACHE_FILE)
+            cached_df = pd.read_parquet(cache_file)
             if not cached_df.empty:
                 last_cached_date = cached_df['日期'].max().date()
-                st.toast(f"✅ 已加载本地缓存，最新日期: {last_cached_date}")
+                st.toast(f"✅ 已加载本地缓存 [{pool_name}]，最新日期: {last_cached_date}")
         except Exception as e:
             st.error(f"读取缓存文件失败: {e}")
 
@@ -96,20 +110,23 @@ def fetch_history_data():
         # 如果是增量更新
         is_incremental = not cached_df.empty
         if not is_incremental:
-            status_text.text("正在初始化全量历史数据...")
+            status_text.text(f"正在初始化 [{pool_name}] 历史数据...")
         else:
             status_text.text(f"正在检查增量数据 ({start_date_str} - {end_date_str})...")
 
         # 获取成分股列表
+        status_text.text(f"正在获取 [{pool_name}] 成分股列表...")
         try:
-            cons_df = ak.index_stock_cons(symbol="000300")
+            # 增加重试
+            cons_df = with_retry(lambda: ak.index_stock_cons(symbol=index_code), retries=5, delay=2.0)
         except:
              if not cached_df.empty:
-                 st.warning("成分股列表获取失败，使用缓存数据")
+                 st.warning("成分股列表获取失败 (网络原因)，使用缓存数据")
                  return cached_df
              return pd.DataFrame()
         
         if cons_df is None or cons_df.empty:
+             st.warning(f"无法获取 [{pool_name}] 成分股列表 (可能是 AkShare 接口变动或网络超时)")
              return cached_df if not cached_df.empty else pd.DataFrame()
 
         if 'variety' in cons_df.columns:
@@ -123,37 +140,32 @@ def fetch_history_data():
         stock_list = cons_df[code_col].tolist()
         stock_names = dict(zip(cons_df[code_col], cons_df[name_col]))
         
-        # --- 尝试获取今日实时数据 (Spot) 修改股票名称 ---
+        # --- 尝试获取今日实时数据 (Spot)  ---
+        # 用于：1. 更新股票名称  2. 补全当日数据(当日行情可能在 hist 接口未出来)
+        today_spot_map = {}
         try:
-             spot_df = ak.stock_zh_a_spot_em()
+             status_text.text("正在同步A股实时数据 (名称/最新价)...")
+             # 增加重试
+             spot_df = with_retry(lambda: ak.stock_zh_a_spot_em(), retries=3, delay=2.0)
+             
              if spot_df is not None and not spot_df.empty:
-                 # 更新名称映射
                  spot_df['代码'] = spot_df['代码'].astype(str)
+                 
+                 # 1. 更新名称映射
                  new_names = dict(zip(spot_df['代码'], spot_df['名称']))
                  stock_names.update(new_names)
+                 
+                 # 2. 准备今日数据映射
+                 # spot_df columns: 代码, 名称, 最新价, 涨跌幅, 成交额 ...
+                 if end_date_str >= start_date_str:
+                    today_spot_map = spot_df.set_index('代码').to_dict('index')
+
         except Exception as e:
-             print(f"Update stock names failed: {e}")
+             # 非致命错误，打印日志即可
+             print(f"Update spots failed: {e}")
 
         new_data_list = []
         total_stocks = len(stock_list)
-        
-        # --- 尝试获取今日实时数据 (Spot) 作为补充 ---
-        # 很多时候 stock_zh_a_hist 在盘中不返回当日数据，或者有些源不返回。
-        # 我们可以拉取 ak.stock_zh_a_spot_em() 获取所有A股实时行情，然后过滤出 CSI300
-        # 仅当我们需要 "今天" 的数据时 (start_date_str <= today_str)
-        today_spot_map = {}
-        has_today_hist = False # 标记是否通过 hist 接口拿到了今天数据
-        
-        if end_date_str >= start_date_str:
-             try:
-                 spot_df = ak.stock_zh_a_spot_em()
-                 if spot_df is not None and not spot_df.empty:
-                     # spot_df columns: 代码, 名称, 最新价, 涨跌幅, 成交额 ...
-                     # 建立映射: code -> row
-                     spot_df['代码'] = spot_df['代码'].astype(str)
-                     today_spot_map = spot_df.set_index('代码').to_dict('index')
-             except Exception as e:
-                 print(f"实时数据拉取失败: {e}")
 
         # 循环获取历史
         # 使用 ThreadPoolExecutor 加速增量历史下载 (如果需要下载很多天)
@@ -161,8 +173,11 @@ def fetch_history_data():
         
         def fetch_one_stock(code, name):
             try:
-                # 获取日线
-                df_hist = ak.stock_zh_a_hist(symbol=code, start_date=start_date_str, end_date=end_date_str, adjust="qfq")
+                # 获取日线 (带重试)
+                df_hist = with_retry(
+                    lambda: ak.stock_zh_a_hist(symbol=code, start_date=start_date_str, end_date=end_date_str, adjust="qfq"),
+                    retries=3, delay=1.0
+                )
                 
                 # 检查是否包含今天
                 # 如果 df_hist 不包含今天，但我们有 today_spot_map，则人工补一行
@@ -180,7 +195,6 @@ def fetch_history_data():
                         row = today_spot_map[code]
                         # 构造一行
                         # 必须字段: 日期, 收盘, 涨跌幅, 成交额, 代码, 名称
-                        # spot row keys: '最新价', '涨跌幅', '成交额'
                         try:
                              new_row = pd.DataFrame([{
                                  '日期': pd.to_datetime(end_date_str),
@@ -269,11 +283,11 @@ def fetch_history_data():
             try:
                 if not os.path.exists("data"):
                     os.makedirs("data")
-                final_df.to_parquet(CACHE_FILE)
+                final_df.to_parquet(cache_file)
                 if not cached_df.empty:
-                    st.toast("💾 增量数据已合并并保存")
+                    st.toast(f"💾 [{pool_name}] 增量数据已合并并保存")
                 else:
-                    st.success("💾 全量数据已初始化")
+                    st.success(f"💾 [{pool_name}] 全量数据已初始化")
             except Exception as e:
                 st.warning(f"无法保存缓存: {e}")
 
@@ -528,14 +542,24 @@ with st.sidebar:
         # 1. 刷新盘中
         if st.button("🟢 刷新今日行情 (盘中)"):
             try:
-                if os.path.exists(CACHE_FILE):
-                    # 读取并删除今天的记录，强制下次加载时触发增量更新
-                    _df = pd.read_parquet(CACHE_FILE)
-                    _today = datetime.now().date()
-                    # 过滤掉 >= 今天的数据
-                    _df_new = _df[_df['日期'].dt.date < _today]
-                    _df_new.to_parquet(CACHE_FILE)
-                    st.toast("已清除今日缓存，正在重新拉取实时数据...")
+                # 只刷新当前选中的
+                # 为了简单，直接清除所有缓存文件里的"今天"数据？或者只清当前的?
+                # 最好只清当前的
+                curr_cache = STOCK_POOLS.get(st.session_state.get("selected_pool_key", "沪深300 (大盘)"))["cache"]
+                # 由于 sidebar 组件 key 问题，这里我们暂时 hack 一下，假设 fetch_history_data 的参数是最新的
+                # 但这里是在 sidebar 渲染，fetch_history_data 在后面
+                # 我们只能依靠 generic logic
+                
+                # 简单做法：清除所有已知的缓存文件的今日数据
+                for p_name, p_cfg in STOCK_POOLS.items():
+                    c_path = p_cfg["cache"]
+                    if os.path.exists(c_path):
+                        _df = pd.read_parquet(c_path)
+                        _today = datetime.now().date()
+                        _df_new = _df[_df['日期'].dt.date < _today]
+                        _df_new.to_parquet(c_path)
+                
+                st.toast("已清除今日缓存(所有池)，正在重新拉取实时数据...")
                 st.cache_data.clear() # 即使是分时数据最好也清一下，以防万一
                 st.rerun()
             except Exception as e:
@@ -548,23 +572,26 @@ with st.sidebar:
 
         # 3. 硬重置
         if st.button("🚨 彻底重置 (删除所有)"):
-            if os.path.exists(CACHE_FILE):
-                os.remove(CACHE_FILE)
-                st.toast("已删除本地所有历史数据。")
+            for p_cfg in STOCK_POOLS.values():
+                c_path = p_cfg["cache"]
+                if os.path.exists(c_path):
+                    os.remove(c_path)
+            st.toast("已删除本地所有历史数据。")
             st.cache_data.clear()
             st.rerun()
-
-    st.info("数据源：沪深300成分股 (AkShare)")
-    st.caption("注：方块大小使用'成交额'代替'市值'，\n反映当日交易热度。")
-
+            
+    # 指数池选择
+    selected_pool = st.selectbox("🎯 目标指数池", list(STOCK_POOLS.keys()), index=0)
+    st.caption(f"当前分析：{selected_pool} 成分股")
+    
     st.markdown("---")
     st.markdown("### 🛠️ 板块过滤")
     filter_cyb = st.checkbox("屏蔽创业板 (300开头)", value=False)
     filter_kcb = st.checkbox("屏蔽科创板 (688开头)", value=False)
     
 # 加载数据
-with st.spinner("正在初始化历史数据仓库..."):
-    origin_df = fetch_history_data()
+with st.spinner(f"正在初始化 [{selected_pool}] 历史数据仓库..."):
+    origin_df = fetch_history_data(selected_pool)
 
 # --- 后台任务检测与控制 ---
 # 检查是否有名为 "PrefetchWorker" 的后台线程
@@ -1136,9 +1163,9 @@ if not origin_df.empty:
                     tab1, tab2 = st.tabs(["沪市 (SH)", "深市 (SZ)"])
                     
                     with tab1:
-                    st.plotly_chart(plot_intraday_v3(sh_stocks, sh_index, f"沪市 - {chart_mode}"), use_container_width=True)
-                with tab2:
-                    st.plotly_chart(plot_intraday_v3(sz_stocks, sz_index, f"深市 - {chart_mode}"), use_container_width=True)
+                        st.plotly_chart(plot_intraday_v3(sh_stocks, sh_index, f"沪市 - {chart_mode}"), use_container_width=True)
+                    with tab2:
+                        st.plotly_chart(plot_intraday_v3(sz_stocks, sz_index, f"深市 - {chart_mode}"), use_container_width=True)
         
         # --- 可视化 ---
         st.subheader(f"📊 {selected_date.strftime('%Y年%m月%d日')} 市场全景热力图")
@@ -1258,29 +1285,60 @@ if not origin_df.empty:
         # 辅助列
         div_df['成交额(亿)'] = div_df['区间总成交'] / 1e8
         
+        # --- 策略筛选 ---
+        st.markdown("### 🔎 策略筛选")
+        strategy_mode = st.radio("选择筛选策略", 
+                                 ["默认 (全部展示)", 
+                                  "🛡️ 护盘/控盘 (逆势大票)", 
+                                  "🔥 游资/活跃 (高换手/高波)",
+                                  "☠️ 出货/砸盘 (放量下跌)"], 
+                                 horizontal=True)
+        
+        if "护盘" in strategy_mode:
+            st.info("💡 **护盘监控**：筛选【成交额前 30%】且【逆势上涨 (指数跌个股涨) 或 显著抗跌】的股票。通常为GJD或大机构动作。")
+            # 逻辑：成交额 Top 30% 且 偏离度 > 0 (最好是 Abs Return > 0 while Market Median < 0)
+            threshold_to = div_df['成交额(亿)'].quantile(0.7)
+            # 如果基准是跌的，我们找红盘的；如果基准是涨的，我们找涨得更多的
+            # “护盘”通常指大盘不好时它好。
+            div_df = div_df[div_df['成交额(亿)'] >= threshold_to]
+            div_df = div_df[div_df['偏离度'] > 2.0] # 显著偏离
+        
+        elif "游资" in strategy_mode:
+            st.info("💡 **游资/活跃**：成交额不必最大，但【换手活跃】（此处暂用成交额/均值近似）且【波动大】。")
+            # 简单逻辑：偏离度绝对值大
+            div_df = div_df[div_df['偏离度'].abs() > 5.0]
+            
+        elif "出货" in strategy_mode:
+            st.info("💡 **出货警示**：成交额大 但 跌幅深（向下偏离大）。")
+            threshold_to = div_df['成交额(亿)'].quantile(0.5)
+            div_df = div_df[(div_df['成交额(亿)'] >= threshold_to) & (div_df['偏离度'] < -3.0)]
+
         col_m1, col_m2 = st.columns(2)
         col_m1.metric("基准(中位数)涨跌幅", f"{market_median_chg:.2f}%")
-        col_m2.metric("分析样本数", f"{len(div_df)} 只")
+        col_m2.metric("当前策略筛选数量", f"{len(div_df)} 只")
         
         st.divider()
 
         # 4. 可视化 - 散点图
         # X: 成交额(Log), Y: 偏离度, Color: 偏离度
-        fig_scatter = px.scatter(
-            div_df,
-            x='成交额(亿)',
-            y='偏离度',
-            color='偏离度',
-            text='名称', # 显示名字
-            color_continuous_scale=['#00a65a', '#ffffff', '#dd4b39'],
-            range_color=[-20, 20], # 限制颜色范围避免极值
-            log_x=True,
-            hover_data=['代码', '区间涨跌幅'],
-            title=f"资金偏离度分布图 (X轴为成交额对数)"
-        )
-        fig_scatter.update_traces(textposition='top center')
-        fig_scatter.update_layout(height=600)
-        st.plotly_chart(fig_scatter, use_container_width=True)
+        if not div_df.empty:
+            fig_scatter = px.scatter(
+                div_df,
+                x='成交额(亿)',
+                y='偏离度',
+                color='偏离度',
+                text='名称', # 显示名字
+                color_continuous_scale=['#00a65a', '#ffffff', '#dd4b39'],
+                # range_color=[-20, 20], # 限制颜色范围避免极值 - 让它自动适应 filtered data
+                log_x=True,
+                hover_data=['代码', '区间涨跌幅'],
+                title=f"资金偏离度分布图 (X轴为成交额对数) - {strategy_mode}"
+            )
+            fig_scatter.update_traces(textposition='top center')
+            fig_scatter.update_layout(height=600)
+            st.plotly_chart(fig_scatter, use_container_width=True)
+        else:
+            st.warning("当前策略下无符合条件的标的。")
         
         # 5. 榜单
         col_list1, col_list2 = st.columns(2)
