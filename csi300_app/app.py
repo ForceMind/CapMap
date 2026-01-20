@@ -63,56 +63,38 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
     cached_df = pd.DataFrame()
     last_cached_date = None
 
+    cached_df = pd.DataFrame()
     # 1. 尝试加载本地缓存
+    last_dates_map = {}
     if os.path.exists(cache_file):
         try:
             cached_df = pd.read_parquet(cache_file)
             if not cached_df.empty:
-                last_cached_date = cached_df['日期'].max().date()
-                st.toast(f"✅ 已加载本地缓存 [{pool_name}]，最新日期: {last_cached_date}")
+                # 确保代码列是字符串
+                cached_df['代码'] = cached_df['代码'].astype(str)
+                # 计算每只股票的最新日期，用于增量更新
+                last_dates_map = cached_df.groupby('代码')['日期'].max().dt.date.to_dict()
+                
+                overall_latest = cached_df['日期'].max().date()
+                st.toast(f"✅ 已加载本地缓存 [{pool_name}]，最新日期: {overall_latest}")
         except Exception as e:
             st.error(f"读取缓存文件失败: {e}")
 
-    # 2. 计算需要下载的时间范围
+    # 2. 准备日期参数
     today = datetime.now().date()
-    
-    # 如果缓存里的日期已经是今天，且现在是盘中，可能用户想刷新
-    # 但简单起见，我们设定：如果缓存最新日期 < 今天，肯定要尝试下载。
-    # 如果缓存最新日期 == 今天，只有当强制刷新时才通过(外部控制)，这里函数内部先假设"已是最新"
-    # 但为了支持盘中刷新，如果 last_cached_date == today，我们其实可以重拉今天的。
-    # 这里我们只处理 last_cached_date < today 的自动增量, 或者 force refresh (caller clears cache)
-    
-    if last_cached_date:
-        if last_cached_date >= today:
-             # 如果已经有今天的数据，暂时直接返回 (用户需点击强制刷新来更新今日盘中数据)
-             # 但为了能够"自动"拉取盘中，如果 last_cached_date == today，我们做个判断？
-             # 现在的逻辑是：如果缓存文件存在且日期>=今天，就不动了。
-             # 这导致如果早上9点跑了一次（有数据），下午3点再跑，还是旧的。
-             # 改进：如果是今天，且现在还没收盘，或者刚收盘，允许覆盖？
-             # 暂保留原逻辑防止频繁请求，依靠 "强制刷新" 按钮来清空缓存。
-             return cached_df
-        
-        start_date_str = (last_cached_date + timedelta(days=1)).strftime("%Y%m%d")
-    else:
-        start_date_str = get_start_date(2)
-        
     end_date_str = today.strftime("%Y%m%d")
-
-    # 如果不需要更新
-    if start_date_str > end_date_str:
-        return cached_df
+    default_start_date_str = get_start_date(2)
 
     # 状态容器
     status_text = st.empty()
     progress_bar = st.progress(0)
     
     try:
-        # 如果是增量更新
-        is_incremental = not cached_df.empty
-        if not is_incremental:
+        # 初始提示
+        if cached_df.empty:
             status_text.text(f"正在初始化 [{pool_name}] 历史数据...")
         else:
-            status_text.text(f"正在检查增量数据 ({start_date_str} - {end_date_str})...")
+            status_text.text(f"正在检查 [{pool_name}] 增量数据 ({end_date_str})...")
 
         # 获取成分股列表
         status_text.text(f"正在获取 [{pool_name}] 成分股列表...")
@@ -137,84 +119,57 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
             code_col = cons_df.columns[0]
             name_col = cons_df.columns[1]
             
-        stock_list = cons_df[code_col].tolist()
-        stock_names = dict(zip(cons_df[code_col], cons_df[name_col]))
+        stock_list = cons_df[code_col].apply(str).tolist() # 强转String
+        stock_names = dict(zip(stock_list, cons_df[name_col]))
         
-        # --- 尝试获取今日实时数据 (Spot)  ---
-        # 用于：1. 更新股票名称  2. 补全当日数据(当日行情可能在 hist 接口未出来)
-        today_spot_map = {}
-        try:
-             status_text.text("正在同步A股实时数据 (名称/最新价)...")
-             # 增加重试
-             spot_df = with_retry(lambda: ak.stock_zh_a_spot_em(), retries=3, delay=2.0)
-             
-             if spot_df is not None and not spot_df.empty:
-                 spot_df['代码'] = spot_df['代码'].astype(str)
-                 
-                 # 1. 更新名称映射
-                 new_names = dict(zip(spot_df['代码'], spot_df['名称']))
-                 stock_names.update(new_names)
-                 
-                 # 2. 准备今日数据映射
-                 # spot_df columns: 代码, 名称, 最新价, 涨跌幅, 成交额 ...
-                 if end_date_str >= start_date_str:
-                    today_spot_map = spot_df.set_index('代码').to_dict('index')
-
-        except Exception as e:
-             # 非致命错误，打印日志即可
-             print(f"Update spots failed: {e}")
+        # --- 移除 stock_zh_a_spot_em 调用 ---
+        # 原因：获取全市场实时数据过于沉重，容易导致IP被Short Ban，从而影响后续历史数据获取
+        # "Previous Version" 没有这一步也能正常运行。
+        today_spot_map = {} 
 
         new_data_list = []
         total_stocks = len(stock_list)
 
-        # 循环获取历史
-        # 使用 ThreadPoolExecutor 加速增量历史下载 (如果需要下载很多天)
-        # 但 akshare 接口频繁调用可能受限，适度并发
+        # 循环获取历史 (Per-Stock Logic)
         
         def fetch_one_stock(code, name):
+            # 智能判断每只股票的开始日期
+            last_dt = last_dates_map.get(code)
+            
+            if last_dt:
+                # 如果这个股票缓存日期已经是今天，跳过
+                if last_dt >= today:
+                    return None
+                cur_start_str = (last_dt + timedelta(days=1)).strftime("%Y%m%d")
+            else:
+                # 如果缓存里没这个股票（新入成分股 or 缓存空），拉2年
+                cur_start_str = default_start_date_str
+            
+            # 如果不需要更新
+            if cur_start_str > end_date_str:
+                return None
+
+            # 加上随机等待，缓解服务端并发压力 (防止 RemoteDisconnected)
+            time.sleep(random.uniform(0.1, 0.5))
+
             try:
-                # 获取日线 (带重试)
+                # 获取日线 (带重试 - 增强版)
+                # 针对 RemoteDisconnected 错误，增加重试次数
                 df_hist = with_retry(
-                    lambda: ak.stock_zh_a_hist(symbol=code, start_date=start_date_str, end_date=end_date_str, adjust="qfq"),
-                    retries=3, delay=1.0
+                    lambda: ak.stock_zh_a_hist(symbol=code, start_date=cur_start_str, end_date=end_date_str, adjust="qfq"),
+                    retries=10, delay=1.0 # 增加重试次数，减少delay以便快速恢复
                 )
                 
-                # 检查是否包含今天
-                # 如果 df_hist 不包含今天，但我们有 today_spot_map，则人工补一行
-                fetched_today = False
-                if df_hist is not None and not df_hist.empty:
-                    df_hist['日期'] = pd.to_datetime(df_hist['日期'])
-                    if end_date_str in df_hist['日期'].dt.strftime("%Y%m%d").values:
-                        fetched_today = True
-                else:
-                    df_hist = pd.DataFrame()
-
-                # 如果没有拉到今天的数据，且我们需要今天 (end_date_str == today)，补全
-                if (not fetched_today) and (end_date_str == datetime.now().strftime("%Y%m%d")):
-                    if code in today_spot_map:
-                        row = today_spot_map[code]
-                        # 构造一行
-                        # 必须字段: 日期, 收盘, 涨跌幅, 成交额, 代码, 名称
-                        try:
-                             new_row = pd.DataFrame([{
-                                 '日期': pd.to_datetime(end_date_str),
-                                 '收盘': row['最新价'],
-                                 '涨跌幅': row['涨跌幅'],
-                                 '成交额': row['成交额'],
-                                 '代码': code,
-                                 '名称': name
-                             }])
-                             df_hist = pd.concat([df_hist, new_row], ignore_index=True)
-                        except:
-                            pass
+                # 不需要人工补全今天的数据 (Today Spot Patching Removed)
+                # 如果 akshare hist 接口包含今天就包含，不包含就算了，保持稳定最重要。
                 
                 if df_hist is not None and not df_hist.empty:
                     # 确保列存在
                     if '日期' not in df_hist.columns: return None
                     cols_needed = ['日期', '收盘', '涨跌幅', '成交额']
-                    for c in cols_needed:
-                        if c not in df_hist.columns: return None
-                    
+                    available_cols = [c for c in cols_needed if c in df_hist.columns]
+                    if len(available_cols) < len(cols_needed): return None
+
                     df_hist = df_hist[cols_needed].copy()
                     df_hist['代码'] = code
                     df_hist['名称'] = name
@@ -223,26 +178,17 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
                 pass
             return None
 
-        # 如果是增量只差1天，其实单线程也快。如果是初始化，并发。
-        # Use concurrency
-        ctx = get_script_run_ctx()
-        def fetch_one_stock_wrapper(code, name):
-            if ctx:
-                add_script_run_ctx(threading.current_thread(), ctx)
-            return fetch_one_stock(code, name)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-             future_map = {executor.submit(fetch_one_stock_wrapper, c, stock_names.get(c, c)): c for c in stock_list}
-             
-             for i, future in enumerate(concurrent.futures.as_completed(future_map)):
-                 # Update progress
-                 if i % 10 == 0:
-                     progress_bar.progress((i + 1) / total_stocks)
-                     status_text.text(f"正在同步数据: {i+1}/{total_stocks}")
-                 
-                 res = future.result()
-                 if res is not None:
-                     new_data_list.append(res)
+        # 改回单线程循环，确保最大稳定性
+        # 既然 akshare 接口不稳定，单线程虽然慢但是最稳的
+        for i, code in enumerate(stock_list):
+            # Update progress
+            if i % 5 == 0:
+                progress_bar.progress((i + 1) / total_stocks)
+                status_text.text(f"正在同步数据: {i+1}/{total_stocks} ({code})")
+            
+            res = fetch_one_stock(code, stock_names.get(code, code))
+            if res is not None:
+                new_data_list.append(res)
                 
         status_text.empty()
         progress_bar.empty()
