@@ -1098,7 +1098,8 @@ if not origin_df.empty:
                     '收盘': '{:.2f}',
                     '涨跌幅': '{:.2f}%',
                     '成交额': '{:,.0f}'
-                })
+                }),
+                hide_index=True
             )
 
 else:
