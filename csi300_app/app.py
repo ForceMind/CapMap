@@ -522,45 +522,45 @@ def fetch_intraday_data_v2(stock_codes, target_date_str, period='1'):
 
 # 2. UI 布局
 # -----------------------------------------------------------------------------
-
-st.title("A股历史盘面回放系统 (沪深300 Market Replay)")
-
-st.markdown("""
-> 🕹️ **操作指南**：
-> 1. 等待数据初始化完成（初次运行可能需要 2-3 分钟）。
-> 2. 拖动下方滑块选择历史日期。
-> 3. 观察当日盘面的资金流向与热度。
-""")
+# (Removed original st.title and instructions here, moved after sidebar)
 
 # 侧边栏
 with st.sidebar:
-    st.header("⚙️ 数据管理")
+    st.header("⚙️ 核心设置")
     
+    # 1. 指数池选择 (最优先)
+    selected_pool = st.selectbox(
+        "🎯 目标指数池", 
+        list(STOCK_POOLS.keys()), 
+        index=0,
+        key="sb_selected_pool"
+    )
+    
+    st.markdown("---")
+    st.header("🔧 数据管理")
+
     with st.expander("数据刷新与维护", expanded=True):
-        st.write("如果数据显示不正确，请尝试以下操作：")
+        st.write(f"当前管理对象: **{selected_pool}**")
         
-        # 1. 刷新盘中
+        # 1. 刷新盘中 (仅针对当前池)
         if st.button("🟢 刷新今日行情 (盘中)"):
             try:
-                # 只刷新当前选中的
-                # 为了简单，直接清除所有缓存文件里的"今天"数据？或者只清当前的?
-                # 最好只清当前的
-                curr_cache = STOCK_POOLS.get(st.session_state.get("selected_pool_key", "沪深300 (大盘)"))["cache"]
-                # 由于 sidebar 组件 key 问题，这里我们暂时 hack 一下，假设 fetch_history_data 的参数是最新的
-                # 但这里是在 sidebar 渲染，fetch_history_data 在后面
-                # 我们只能依靠 generic logic
+                # 获取当前池的配置
+                p_cfg = STOCK_POOLS[selected_pool]
+                c_path = p_cfg["cache"]
                 
-                # 简单做法：清除所有已知的缓存文件的今日数据
-                for p_name, p_cfg in STOCK_POOLS.items():
-                    c_path = p_cfg["cache"]
-                    if os.path.exists(c_path):
-                        _df = pd.read_parquet(c_path)
-                        _today = datetime.now().date()
-                        _df_new = _df[_df['日期'].dt.date < _today]
-                        _df_new.to_parquet(c_path)
-                
-                st.toast("已清除今日缓存(所有池)，正在重新拉取实时数据...")
-                st.cache_data.clear() # 即使是分时数据最好也清一下，以防万一
+                if os.path.exists(c_path):
+                    # 读取并删除今天的记录
+                    _df = pd.read_parquet(c_path)
+                    _today = datetime.now().date()
+                    # 过滤掉 >= 今天的数据
+                    _df_new = _df[_df['日期'].dt.date < _today]
+                    _df_new.to_parquet(c_path)
+                    st.toast(f"已清除 [{selected_pool}] 今日缓存，正在重新同步...")
+                else:
+                    st.toast(f"[{selected_pool}] 暂无本地缓存，直接刷新...")
+                    
+                st.cache_data.clear() # 清除 Streamlit 内存缓存
                 st.rerun()
             except Exception as e:
                 st.error(f"操作失败: {e}")
@@ -570,20 +570,25 @@ with st.sidebar:
             st.cache_data.clear()
             st.toast("✅ 所有内存缓存已清空，下次查看分时图将重新下载。")
 
-        # 3. 硬重置
-        if st.button("🚨 彻底重置 (删除所有)"):
-            for p_cfg in STOCK_POOLS.values():
-                c_path = p_cfg["cache"]
-                if os.path.exists(c_path):
-                    os.remove(c_path)
-            st.toast("已删除本地所有历史数据。")
+        # 3. 硬重置 (当前池)
+        if st.button(f"🚨 重置 [{selected_pool}] 历史数据"):
+            p_cfg = STOCK_POOLS[selected_pool]
+            c_path = p_cfg["cache"]
+            if os.path.exists(c_path):
+                os.remove(c_path)
+                st.toast(f"已删除 [{selected_pool}] 本地历史文件。")
             st.cache_data.clear()
             st.rerun()
             
-    # 指数池选择
-    selected_pool = st.selectbox("🎯 目标指数池", list(STOCK_POOLS.keys()), index=0)
-    st.caption(f"当前分析：{selected_pool} 成分股")
-    
+        # 4. 全局重置 (Hidden or advanced)
+        if st.checkbox("显示高级选项 (全局重置)"):
+             if st.button("💣 毁灭吧赶紧的 (删除所有池数据)"):
+                for p_name, p_val in STOCK_POOLS.items():
+                    if os.path.exists(p_val["cache"]):
+                        os.remove(p_val["cache"])
+                st.cache_data.clear()
+                st.rerun()
+
     st.markdown("---")
     st.markdown("### 🛠️ 板块过滤")
     filter_cyb = st.checkbox("屏蔽创业板 (300开头)", value=False)
@@ -592,6 +597,17 @@ with st.sidebar:
 # 加载数据
 with st.spinner(f"正在初始化 [{selected_pool}] 历史数据仓库..."):
     origin_df = fetch_history_data(selected_pool)
+
+st.title(f"A股历史盘面回放 - {selected_pool} (Market Replay)")
+
+st.markdown("""
+> 🕹️ **操作指南**：
+> 1. 等待数据初始化完成（初次运行可能需要 2-3 分钟）。
+> 2. 拖动下方滑块选择历史日期。
+> 3. 观察当日盘面的资金流向与热度。
+""")
+
+
 
 # --- 后台任务检测与控制 ---
 # 检查是否有名为 "PrefetchWorker" 的后台线程
