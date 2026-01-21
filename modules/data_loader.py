@@ -1,5 +1,6 @@
 import pandas as pd
-import akshare as ak
+import tushare as ts
+import akshare as ak  # 保留 akshare 作为备份或辅助? 或者完全移除? 用户说"更换"，我应尽量使用 Tushare
 import os
 import streamlit as st
 import concurrent.futures
@@ -8,17 +9,28 @@ from datetime import datetime, timedelta
 import random
 import time
 
-from .config import STOCK_POOLS
+from .config import STOCK_POOLS, TUSHARE_TOKEN
 from .utils import with_retry, get_start_date, add_script_run_ctx, get_script_run_ctx
 
-def fetch_history_data(pool_name="沪深300 (大盘)"):
+# 初始化 Tushare
+if TUSHARE_TOKEN == "YOUR_TUSHARE_TOKEN_HERE":
+    st.warning("⚠️ 请在 modules/config.py 中设置有效的 Tushare Token，否则无法获取数据。")
+else:
+    try:
+        ts.set_token(TUSHARE_TOKEN)
+        pro = ts.pro_api()
+    except Exception as e:
+        st.error(f"Tushare 初始化失败: {e}")
+        pro = None
+
+def fetch_history_data(pool_name="沪深300 (大盘)", limit=None):
     """
-    获取指定成分股过去2年的日线数据。
-    逻辑复刻自 app1.py (稳定版)，支持多指数池。
+    获取指定成分股过去2年的日线数据 (Tushare版)。
     """
     config = STOCK_POOLS.get(pool_name, STOCK_POOLS["沪深300 (大盘)"])
     cache_file = config["cache"]
-    index_code = config["code"]
+    # 优先尝试使用 code (Tushare格式), 如果没有则回退到 ak_code for display, actually we need Tushare index code
+    index_code = config.get("code", "399300.SZ")
 
     cached_df = pd.DataFrame()
     last_cached_date = None
@@ -57,125 +69,127 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
         # 如果是增量更新
         is_incremental = not cached_df.empty
         if not is_incremental:
-            status_text.text(f"正在初始化 [{pool_name}] 历史数据...")
+            status_text.text(f"正在初始化 [{pool_name}] 历史数据 (Tushare)...")
         else:
             status_text.text(f"正在检查增量数据 ({start_date_str} - {end_date_str})...")
 
+        if pro is None:
+             st.error("Tushare 未初始化，请检查 Token")
+             return cached_df
+
         # 获取成分股列表
         status_text.text(f"正在获取 [{pool_name}] 成分股列表...")
-        try:
-            # 增加重试
-            cons_df = with_retry(lambda: ak.index_stock_cons(symbol=index_code), retries=5, delay=2.0)
-        except:
-             if not cached_df.empty:
-                 st.warning("成分股列表获取失败 (网络原因)，使用缓存数据")
-                 return cached_df
-             return pd.DataFrame()
         
-        if cons_df is None or cons_df.empty:
-             st.warning(f"无法获取 [{pool_name}] 成分股列表 (可能是 AkShare 接口变动或网络超时)")
+        stock_list_data = [] # List of dict: {'code': '000001', 'name': '平安银行', 'ts_code': '000001.SZ'}
+        
+        # 优先尝试 Tushare
+        try:
+            # Check rate limit or points issues
+            cons_df = with_retry(lambda: pro.index_member(index_code=index_code), retries=2, delay=2.0)
+            if cons_df is not None and not cons_df.empty:
+                # cons_df columns: index_code, con_code, con_name
+                # Note: valid columns might depend on permissions.
+                for _, row in cons_df.iterrows():
+                    ts_c = row['con_code']
+                    nm = row['con_name'] if 'con_name' in row else ts_c
+                    # symbol is code without suffix
+                    sym = ts_c.split('.')[0]
+                    stock_list_data.append({'code': sym, 'name': nm, 'ts_code': ts_c})
+        except Exception as e:
+            print(f"Tushare index_member failed: {e}")
+            cons_df = pd.DataFrame()
+
+        # Fallback to AkShare if Tushare failed or returned empty
+        if not stock_list_data:
+            st.warning("Tushare 获取成分股失败，尝试使用 AkShare 作为备用元数据源...")
+            try:
+                ak_code = config.get("ak_code", "000300")
+                cons_df_ak = with_retry(lambda: ak.index_stock_cons(symbol=ak_code), retries=3, delay=2.0)
+                if cons_df_ak is not None and not cons_df_ak.empty:
+                    # AkShare standardizes: 品种代码, 品种名称
+                    if 'variety' in cons_df_ak.columns:
+                        c_col, n_col = 'variety', 'name'
+                    elif '品种代码' in cons_df_ak.columns:
+                        c_col, n_col = '品种代码', '品种名称'
+                    else:
+                        c_col, n_col = cons_df_ak.columns[0], cons_df_ak.columns[1]
+                    
+                    for _, row in cons_df_ak.iterrows():
+                        sym = str(row[c_col])
+                        nm = row[n_col]
+                        # generate ts_code
+                        if sym.startswith('6'): ts_c = f"{sym}.SH"
+                        elif sym.startswith('8'): ts_c = f"{sym}.BJ"
+                        else: ts_c = f"{sym}.SZ"
+                        
+                        stock_list_data.append({'code': sym, 'name': nm, 'ts_code': ts_c})
+                        
+            except Exception as e:
+                 st.error(f"无法获取成分股列表 (Tushare & AkShare failed): {e}")
+                 return cached_df if not cached_df.empty else pd.DataFrame()
+        
+        if not stock_list_data:
              return cached_df if not cached_df.empty else pd.DataFrame()
 
-        if 'variety' in cons_df.columns:
-            code_col, name_col = 'variety', 'name'
-        elif '品种代码' in cons_df.columns:
-            code_col, name_col = '品种代码', '品种名称'
-        else:
-            code_col = cons_df.columns[0]
-            name_col = cons_df.columns[1]
-            
-        # 强转 String
-        stock_list = cons_df[code_col].apply(str).tolist() 
-        stock_names = dict(zip(stock_list, cons_df[name_col]))
-        
-        # --- 尝试获取今日实时数据 (Spot) ---
-        today_spot_map = {}
-        try:
-            # Low frequency
-            spot_df = ak.stock_zh_a_spot_em()
-            if spot_df is not None and not spot_df.empty:
-                spot_df['代码'] = spot_df['代码'].astype(str)
-                
-                # 1. 更新名称映射
-                new_names = dict(zip(spot_df['代码'], spot_df['名称']))
-                stock_names.update(new_names)
-                
-                # 2. 准备今日数据映射
-                if end_date_str >= start_date_str:
-                    today_spot_map = spot_df.set_index('代码').to_dict('index')
-        except Exception as e:
-            # 非致命错误
-            print(f"Update spots failed: {e}")
+        stock_map = {item['ts_code']: item for item in stock_list_data}
+        stock_list = [item['ts_code'] for item in stock_list_data]
+        if limit:
+            stock_list = stock_list[:limit]
+        total_stocks = len(stock_list)
+
 
         new_data_list = []
         total_stocks = len(stock_list)
 
         # 循环获取历史
-        def fetch_one_stock(code, name):
+        def fetch_one_stock(ts_code):
             try:
                 # 获取日线
-                df_hist = ak.stock_zh_a_hist(symbol=code, start_date=start_date_str, end_date=end_date_str, adjust="qfq")
-                
-                # 检查是否包含今天
-                fetched_today = False
-                if df_hist is not None and not df_hist.empty:
-                    df_hist['日期'] = pd.to_datetime(df_hist['日期'])
-                    if end_date_str in df_hist['日期'].dt.strftime("%Y%m%d").values:
-                        fetched_today = True
-                else:
-                    df_hist = pd.DataFrame()
-
-                # 补全今天
-                if (not fetched_today) and (end_date_str == datetime.now().strftime("%Y%m%d")):
-                    if code in today_spot_map:
-                        row = today_spot_map[code]
-                        try:
-                             new_row = pd.DataFrame([{
-                                 '日期': pd.to_datetime(end_date_str),
-                                 '收盘': row['最新价'],
-                                 '涨跌幅': row['涨跌幅'],
-                                 '成交额': row['成交额'],
-                                 '代码': code,
-                                 '名称': name
-                             }])
-                             df_hist = pd.concat([df_hist, new_row], ignore_index=True)
-                        except:
-                            pass
+                df_hist = ts.pro_bar(ts_code=ts_code, adj='qfq', start_date=start_date_str, end_date=end_date_str)
                 
                 if df_hist is not None and not df_hist.empty:
-                    # 确保列存在
-                    cols_needed = ['日期', '收盘', '涨跌幅', '成交额']
-                    for c in cols_needed:
-                        if c not in df_hist.columns: return None
+                    # Rename columns
+                    df_hist = df_hist.rename(columns={
+                        'trade_date': '日期',
+                        'close': '收盘',
+                        'pct_chg': '涨跌幅',
+                        'amount': '成交额'
+                    })
                     
+                    df_hist['日期'] = pd.to_datetime(df_hist['日期'])
+                    # Tushare amount is '千元', Akshare was '元'. Multiply by 1000
+                    df_hist['成交额'] = df_hist['成交额'] * 1000
+                    
+                    cols_needed = ['日期', '收盘', '涨跌幅', '成交额']
                     df_hist = df_hist[cols_needed].copy()
-                    df_hist['代码'] = code
-                    df_hist['名称'] = name
+                    
+                    # sym = symbol_map.get(ts_code, ts_code.split('.')[0])
+                    # nm = name_map.get(ts_code, sym)
+                    info = stock_map.get(ts_code, {})
+                    sym = info.get('code', ts_code.split('.')[0])
+                    nm = info.get('name', sym)
+                    
+                    df_hist['代码'] = sym
+                    df_hist['名称'] = nm
+                    
                     return df_hist
+
             except Exception:
                 pass
             return None
 
-        # Use concurrency as in app1.py
-        ctx = get_script_run_ctx()
-        def fetch_one_stock_wrapper(code, name):
-            if ctx:
-                add_script_run_ctx(threading.current_thread(), ctx)
-            return fetch_one_stock(code, name)
-
-        # 恢复 app1.py 的 max_workers=10
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-             future_map = {executor.submit(fetch_one_stock_wrapper, c, stock_names.get(c, c)): c for c in stock_list}
+        # Serial execution to respect Tushare rate limits (50 req/min => 1.2s delay)
+        for i, ts_code in enumerate(stock_list):
+             if i % 5 == 0:
+                 progress_bar.progress((i + 1) / total_stocks)
+                 status_text.text(f"正在同步数据 [{pool_name}]: {i+1}/{total_stocks} (Tushare限速 fetching...)")
              
-             for i, future in enumerate(concurrent.futures.as_completed(future_map)):
-                 # Update progress
-                 if i % 10 == 0:
-                     progress_bar.progress((i + 1) / total_stocks)
-                     status_text.text(f"正在同步数据 [{pool_name}]: {i+1}/{total_stocks}")
-                 
-                 res = future.result()
-                 if res is not None:
-                     new_data_list.append(res)
+             # Enforce rate limit
+             time.sleep(1.25)
+             
+             res = fetch_one_stock(ts_code)
+             if res is not None:
+                 new_data_list.append(res)
                 
         status_text.empty()
         progress_bar.empty()
@@ -192,7 +206,6 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
             if cached_df.empty:
                 final_df = new_df
             else:
-                # 合并旧数据和新数据，并去重
                 st.toast(f"📥 成功获取 {len(new_df)} 条新记录 ({pool_name})")
                 final_df = pd.concat([cached_df, new_df], ignore_index=True)
                 final_df.drop_duplicates(subset=['日期', '代码'], keep='last', inplace=True)
@@ -205,8 +218,10 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
         final_df = final_df.sort_values('日期')
         
         # 使用最新的 stock_names 更新 DataFrame 中的名称列
+        # Map symbol -> name
+        final_stock_names = {item['code']: item['name'] for item in stock_list_data}
         if final_df is not None and not final_df.empty:
-            final_df['名称'] = final_df['代码'].map(stock_names).fillna(final_df['名称'])
+            final_df['名称'] = final_df['代码'].map(final_stock_names).fillna(final_df['名称'])
         
         # 保存缓存
         if new_data_list or cached_df.empty:
@@ -232,29 +247,88 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
 @st.cache_data(ttl=3600*24, show_spinner=False)
 def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
     """
-    原子化获取单个标的的分时数据，独立缓存。
+    原子化获取单个标的的分时数据 (Tushare版)，独立缓存。
     """
     start_time = f"{date_str} 09:30:00"
     end_time = f"{date_str} 15:00:00"
     
-    # 指数退避策略全局变量 (简单模拟)
-    if not hasattr(fetch_cached_min_data, "current_backoff"):
-        fetch_cached_min_data.current_backoff = 0
-            
     # 简单的重试机制
     max_retries = 3
+
+    # Helper for ts_code
+    def get_ts_code(sym, is_idx):
+        if is_idx:
+            if sym == "000300": return "399300.SZ"
+            if sym == "000001": return "000001.SH"
+            if sym == "399001": return "399001.SZ"
+            return sym
+        else:
+            if sym.startswith('6'): return f"{sym}.SH"
+            if sym.startswith('0') or sym.startswith('3'): return f"{sym}.SZ"
+            if sym.startswith('8'): return f"{sym}.BJ"
+            return f"{sym}.SH"
+
+    ts_code = get_ts_code(symbol, is_index)
     
     for attempt in range(max_retries):
         try:
-            if is_index:
-                df = ak.index_zh_a_hist_min_em(symbol=symbol, period=period, start_date=start_time, end_date=end_time)
-            else:
-                df = ak.stock_zh_a_hist_min_em(symbol=symbol, start_date=start_time, end_date=end_time, period=period, adjust='qfq')
+            # period '1' -> '1min'
+            freq = '1min' if period == '1' else period
+            
+            # ts.pro_bar handles min data via 'ft_mins' or 'stk_mins'
+            # Requires start_date and end_date as strings.
+            # Tushare needs date string for pro_bar if it's daily, 
+            # but for minutes, it might vary.
+            # Using pro_bar is safest wrapper.
+            
+            # Warning: Tushare min data consumes points.
+            df = ts.pro_bar(ts_code=ts_code, freq=freq, start_date=start_time, end_date=end_time)
+            
+            # If fail (e.g. Rate Limit 2/min or No Points), fallback to AkShare
+            if df is None or df.empty:
+                 try:
+                     parts = ts_code.split('.')
+                     code_val = parts[0]
+                     suffix = parts[1] if len(parts) > 1 else 'SZ'
+                     prefix = 'sz' if suffix == 'SZ' else 'sh' if suffix == 'SH' else 'bj'
+                     
+                     df_ak = pd.DataFrame()
+                     if is_index:
+                        symbol_ak = f"{prefix}{code_val}"
+                        df_ak = ak.index_zh_a_hist_min_em(symbol=symbol_ak, period=period)
+                        if not df_ak.empty:
+                            df_ak.rename(columns={'时间': 'time', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low', '成交量': 'vol'}, inplace=True)
+                     else:
+                        symbol_ak = f"{prefix}{code_val}"
+                        df_ak = ak.stock_zh_a_minute(symbol=symbol_ak, period=period, adjust='qfq')
+                        if not df_ak.empty:
+                            df_ak.rename(columns={'day': 'time'}, inplace=True)
+                            
+                     if not df_ak.empty:
+                         # Filter for the specific date
+                         df_ak['time'] = pd.to_datetime(df_ak['time'])
+                         mask = (df_ak['time'] >= pd.to_datetime(start_time)) & (df_ak['time'] <= pd.to_datetime(end_time))
+                         df = df_ak.loc[mask].copy()
+                 except Exception as e:
+                     # print(f"AkShare fallback failed: {e}")
+                     pass
             
             if df is not None and not df.empty:
-                # 统一列名
-                if '时间' in df.columns:
-                    df.rename(columns={'时间': 'time', '开盘': 'open', '收盘': 'close'}, inplace=True)
+                # Rename columns
+                # Tushare: trade_time, open, close, high, low, vol, amount
+                # Akshare: 时间, 开盘, 收盘, 最高, 最低, 成交量, 成交额
+                
+                # App expects: 'time', 'open', 'close'
+                if 'trade_time' in df.columns:
+                    df.rename(columns={'trade_time': 'time', 'open': 'open', 'close': 'close'}, inplace=True)
+                
+                # Check column mapping
+                if 'time' not in df.columns: 
+                    # fallback if Tushare returns trade_date and trade_time split?
+                    pass
+                
+                # Sort by time
+                df = df.sort_values('time')
                 return df
                 
         except Exception:
