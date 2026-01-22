@@ -1,290 +1,437 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
+import threading
 
-# --- Proxy Fix for System Environments ---
-# Remove system proxies that might block requests to Eastmoney/Sina
-for k in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY']:
-    if k in os.environ:
-        del os.environ[k]
-# Force no proxy if needed by libraries
-os.environ['NO_PROXY'] = '*'
-
-# Import custom modules
 from modules.config import STOCK_POOLS
 from modules.data_loader import fetch_history_data, fetch_intraday_data_v2, background_prefetch_task
 from modules.analysis import calculate_deviation_data, filter_deviation_data
 from modules.visualization import plot_market_heatmap, plot_deviation_scatter, plot_intraday_charts
-import modules.utils as utils
+from modules.utils import add_script_run_ctx
 
-# --- Page Configuration ---
 st.set_page_config(
-    page_title="A股资金全景分析 (Pro)",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="A?????????",
+    page_icon="?",
+    layout="wide"
 )
 
-# --- Sidebar Controls ---
-st.sidebar.title("🎮 控制面板")
+with st.sidebar:
+    st.header("?? ????")
 
-# 1. Strategy / Pool Selection
-selected_pool = st.sidebar.selectbox(
-    "📊 选择指数池", 
-    options=list(STOCK_POOLS.keys()),
-    index=0
-)
+    selected_pool = st.selectbox(
+        "?? ?????",
+        list(STOCK_POOLS.keys()),
+        index=0,
+        key="sb_selected_pool"
+    )
 
-# 2. Data Loading
-if st.sidebar.button("🔄 刷新全部数据"):
-    st.cache_data.clear()
-    st.rerun()
+    st.markdown("---")
+    st.header("?? ????")
 
-# Load Historical Data
-with st.spinner(f"🚀 正在调用AKShare接口获取 [{selected_pool}] 历史数据..."):
-    full_df = fetch_history_data(selected_pool)
+    with st.expander("???????", expanded=True):
+        st.write(f"??????: **{selected_pool}**")
 
-if full_df.empty:
-    st.error("""
-    **无法加载数据**
-    
-    可能有以下原因：
-    1. **网络连接问题**: 无法连接到 AkShare 数据源 (EaseMoney/Sina)。已尝试绕过系统代理。
-    2. **接口变动**: 数据源接口可能已更新。
-    3. **非交易时间/数据未更新**: 如果是在开盘前，可能获取不到最新数据。
-    
-    建议：
-    - 检查网络连接。
-    - 尝试点击左侧 "刷新全部数据" 按钮。
-    """)
+        if st.button("?? ?????? (??)"):
+            try:
+                p_cfg = STOCK_POOLS[selected_pool]
+                c_path = p_cfg["cache"]
+
+                if os.path.exists(c_path):
+                    _df = pd.read_parquet(c_path)
+                    if not _df.empty:
+                        _df['??'] = pd.to_datetime(_df['??'])
+                    _today = datetime.now().date()
+                    _df_new = _df[_df['??'].dt.date < _today]
+                    _df_new.to_parquet(c_path)
+                    st.toast(f"??? [{selected_pool}] ???????????...")
+                else:
+                    st.toast(f"[{selected_pool}] ???????????...")
+
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(f"????: {e}")
+
+        if st.button("?? ???????"):
+            st.cache_data.clear()
+            st.toast("? ???????????????????????")
+
+        if st.button(f"?? ?? [{selected_pool}] ????"):
+            p_cfg = STOCK_POOLS[selected_pool]
+            c_path = p_cfg["cache"]
+            if os.path.exists(c_path):
+                os.remove(c_path)
+                st.toast(f"??? [{selected_pool}] ???????")
+            st.cache_data.clear()
+            st.rerun()
+
+        if st.checkbox("?????? (????)"):
+            if st.button("?? ?????? (???????)"):
+                for p_name, p_val in STOCK_POOLS.items():
+                    if os.path.exists(p_val["cache"]):
+                        os.remove(p_val["cache"])
+                st.cache_data.clear()
+                st.rerun()
+
+    st.markdown("---")
+    st.markdown("### ??? ????")
+    filter_cyb = st.checkbox("????? (300??)", value=False)
+    filter_kcb = st.checkbox("????? (688??)", value=False)
+
+    st.markdown("---")
+    nav_option = st.radio(
+        "?? ????",
+        ["?? ????", "?? ??????"],
+        index=0
+    )
+
+with st.spinner(f"????? [{selected_pool}] ??????..."):
+    origin_df = fetch_history_data(selected_pool)
+
+# --- ????????? ---
+bg_thread = None
+for t in threading.enumerate():
+    if t.name == "PrefetchWorker":
+        bg_thread = t
+        break
+
+with st.sidebar:
+    st.markdown("---")
+    with st.expander("?? ??????", expanded=False):
+        st.caption("???????? N ?????")
+        prefetch_days = st.number_input("????", min_value=5, max_value=200, value=30, step=10)
+
+        if bg_thread and bg_thread.is_alive():
+            st.info("?? ???????...\n????????")
+        else:
+            if st.button("?? ??????"):
+                if not origin_df.empty:
+                    all_dates = sorted(origin_df['??'].dt.date.unique())
+                    target_prefetch_dates = all_dates[-prefetch_days:]
+
+                    t = threading.Thread(
+                        target=background_prefetch_task,
+                        args=(target_prefetch_dates, origin_df),
+                        name="PrefetchWorker",
+                        daemon=True
+                    )
+                    add_script_run_ctx(t)
+                    t.start()
+                    st.rerun()
+                else:
+                    st.error("????????")
+
+if origin_df.empty:
+    st.error("?????????????")
     st.stop()
 
-# 3. Date Selection
-# Get available dates from data
-available_dates = sorted(full_df['日期'].unique())
-if not available_dates:
-    st.error("数据源日期为空。")
+# ????
+filtered_df = origin_df.copy()
+if filter_cyb:
+    filtered_df = filtered_df[~filtered_df['??'].astype(str).str.startswith('300')]
+if filter_kcb:
+    filtered_df = filtered_df[~filtered_df['??'].astype(str).str.startswith('688')]
+
+if filtered_df.empty:
+    st.warning("??????????????????????")
     st.stop()
 
-# Default to last available date
-default_end_date = available_dates[-1]
-# Default range: last 20 trading days
-start_idx = max(0, len(available_dates) - 20)
-default_start_date = available_dates[start_idx]
+if nav_option == "?? ????":
+    st.title(f"A??????? - {selected_pool} (Market Replay)")
+    st.markdown(
+        "> ??? **????**?\n"
+        "> 1. ?????????????????? 2-3 ????\n"
+        "> 2. ?????????????\n"
+        "> 3. ???????????????"
+    )
 
-# Date Range Picker
-st.sidebar.subheader("📅 时间范围")
-col_d1, col_d2 = st.sidebar.columns(2)
-with col_d1:
-    start_date = st.date_input("开始日期", value=default_start_date, min_value=available_dates[0], max_value=available_dates[-1])
-with col_d2:
-    end_date = st.date_input("结束日期", value=default_end_date, min_value=available_dates[0], max_value=available_dates[-1])
+    available_dates = sorted(filtered_df['??'].dt.date.unique())
 
-# Convert to datetime for filtering
-start_date = pd.Timestamp(start_date)
-end_date = pd.Timestamp(end_date)
+    if 'selected_date_idx' not in st.session_state:
+        st.session_state.selected_date_idx = len(available_dates) - 1
 
-# Filter Data
-mask = (full_df['日期'] >= start_date) & (full_df['日期'] <= end_date)
-filtered_df = full_df.loc[mask].copy()
+    if st.session_state.selected_date_idx >= len(available_dates):
+        st.session_state.selected_date_idx = len(available_dates) - 1
+    if st.session_state.selected_date_idx < 0:
+        st.session_state.selected_date_idx = 0
 
-# Get dates actually present in the range
-selected_dates = sorted(filtered_df['日期'].unique())
-selected_dates_str = [pd.Timestamp(d).strftime('%Y-%m-%d') for d in selected_dates]
+    st.markdown("### ?? ??????")
 
+    mode_col1, mode_col2 = st.columns([1, 3])
+    with mode_col1:
+        playback_mode = st.radio("????", ["????", "??????"], horizontal=True)
 
-# --- Main Content ---
-st.title(f"📈 {selected_pool} 资金情绪监控")
-st.caption(f"数据范围: {start_date.strftime('%Y-%m-%d')} 至 {end_date.strftime('%Y-%m-%d')} | 包含 {len(selected_dates)} 个交易日")
+    if playback_mode == "????":
+        col_prev, col_slider, col_next = st.columns([1, 6, 1])
 
-# Tabs for different views
-tab1, tab2, tab3 = st.tabs(["🗺️ 市场热力图", "🎯 资金偏离度分析", "📉 分时走势叠加"])
+        with col_prev:
+            st.write("")
+            st.write("")
+            if st.button("?? ???"):
+                if st.session_state.selected_date_idx > 0:
+                    st.session_state.selected_date_idx -= 1
+                    st.rerun()
 
-# --- Tab 1: Heatmap ---
-with tab1:
-    st.subheader("每日成交额资金分布")
-    
-    # Date slider for heatmap
-    if len(selected_dates_str) > 0:
-        hm_date_idx = st.slider(
-            "选择日期查看热力图", 
-            min_value=0, 
-            max_value=len(selected_dates_str)-1, 
-            value=len(selected_dates_str)-1,
-            format="YYYY-MM-DD"
+        with col_next:
+            st.write("")
+            st.write("")
+            if st.button("??? ??"):
+                if st.session_state.selected_date_idx < len(available_dates) - 1:
+                    st.session_state.selected_date_idx += 1
+                    st.rerun()
+
+        with col_slider:
+            current_date_val = available_dates[st.session_state.selected_date_idx]
+            picked_date = st.date_input(
+                "??",
+                value=current_date_val,
+                min_value=available_dates[0],
+                max_value=available_dates[-1],
+                label_visibility="collapsed"
+            )
+
+            if picked_date != current_date_val:
+                if picked_date in available_dates:
+                    st.session_state.selected_date_idx = available_dates.index(picked_date)
+                else:
+                    closest_date = min(available_dates, key=lambda d: abs(d - picked_date))
+                    st.session_state.selected_date_idx = available_dates.index(closest_date)
+                    st.toast(f"?? ???????????????: {closest_date}")
+                st.rerun()
+
+        target_dates = [available_dates[st.session_state.selected_date_idx]]
+        selected_date = target_dates[0]
+
+    else:
+        with mode_col2:
+            date_range = st.date_input(
+                "?????? (?????5????????)",
+                value=[available_dates[-5] if len(available_dates) > 5 else available_dates[0], available_dates[-1]],
+                min_value=available_dates[0],
+                max_value=available_dates[-1]
+            )
+
+        if len(date_range) == 2:
+            start_d, end_d = date_range
+            target_dates = [d for d in available_dates if start_d <= d <= end_d]
+            if not target_dates:
+                st.warning("?? ??????????????????????")
+                target_dates = [available_dates[-1]]
+            st.info(f"??? {len(target_dates)} ??????????")
+            selected_date = target_dates[-1]
+        else:
+            st.warning("?????????????")
+            target_dates = [available_dates[-1]]
+            selected_date = available_dates[-1]
+
+    daily_df = filtered_df[filtered_df['??'].dt.date == selected_date].copy()
+
+    if daily_df.empty:
+        st.warning(f"{selected_date} ??????????????????????")
+    else:
+        median_chg = daily_df['???'].median()
+        total_turnover = daily_df['???'].sum() / 1e8
+        top_gainer = daily_df.loc[daily_df['???'].idxmax()]
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("??????", selected_date.strftime("%Y-%m-%d"))
+        col2.metric("????????", f"{median_chg:.2f}%", delta=f"{median_chg:.2f}%", delta_color="normal")
+        col3.metric("??????", f"{total_turnover:.1f} ?")
+        col4.metric("????", f"{top_gainer['??']} ({top_gainer['???']:.2f}%)")
+
+        st.markdown("---")
+        st.subheader("?? ??????????")
+
+        col_mode, col_num = st.columns([3, 1])
+        with col_mode:
+            chart_mode = st.radio("????", ["??? Top (???)", "???? Top (????)"], horizontal=True)
+        with col_num:
+            top_n = st.number_input(
+                "????",
+                min_value=5,
+                max_value=50,
+                value=20,
+                step=5,
+                help="?/??? N ???????? 2N?",
+                key="top_n_stocks_input"
+            )
+
+        st.caption(f"?????????? **{selected_date}** ?????????????????????????????????")
+        st.caption("?????? = ??? ? ??(??????/????)????????????????")
+
+        show_intraday = st.checkbox("?????? (????????)", value=False)
+
+        if show_intraday:
+            progress_area = st.empty()
+
+            if "???" in chart_mode:
+                sort_col = '???'
+            else:
+                daily_df['abs_impact'] = (daily_df['???'] * daily_df['???']).abs()
+                sort_col = 'abs_impact'
+
+            sh_pool = daily_df[daily_df['??'].astype(str).str.startswith('6')].copy()
+            sz_pool = daily_df[~daily_df['??'].astype(str).str.startswith('6')].copy()
+
+            sh_top = sh_pool.sort_values(sort_col, ascending=False).head(top_n)
+            sz_top = sz_pool.sort_values(sort_col, ascending=False).head(top_n)
+
+            top_stocks_df = pd.concat([sh_top, sz_top], ignore_index=True)
+
+            target_stocks_list = []
+            for _, row in top_stocks_df.iterrows():
+                target_stocks_list.append((row['??'], row['??'], row['???']))
+
+            all_intraday_data = []
+            period_to_use = '1'
+
+            if len(target_dates) > 5 and playback_mode == "??????":
+                if len(target_dates) > 30:
+                    period_to_use = '15'
+                    st.info(f"?? ???? {len(target_dates)} ??????????15???????")
+                else:
+                    period_to_use = '5'
+                    st.info(f"?? ???? {len(target_dates)} ??????????5???????")
+            elif len(target_dates) > 10:
+                st.toast(f"?? ???? {len(target_dates)} ?????????????????...")
+
+            target_dates_to_fetch = target_dates
+            total_steps = len(target_dates_to_fetch)
+
+            status_text = st.empty()
+            fetch_progress = st.progress(0)
+
+            for i, d_date in enumerate(target_dates_to_fetch):
+                status_text.text(f"?? ????: {d_date.strftime('%Y-%m-%d')} ({i+1}/{total_steps})...")
+                fetch_progress.progress((i + 1) / total_steps)
+
+                d_str = d_date.strftime("%Y-%m-%d")
+                day_results = fetch_intraday_data_v2(target_stocks_list, d_str, period=period_to_use)
+
+                for res in day_results:
+                    res['data']['date_col'] = d_str
+                    res['real_date'] = d_date
+
+                all_intraday_data.extend(day_results)
+
+            status_text.empty()
+            fetch_progress.empty()
+            progress_area.empty()
+
+            if not all_intraday_data:
+                st.warning("?????????")
+            else:
+                valid_dates = set()
+                for item in all_intraday_data:
+                    if 'real_date' in item:
+                        valid_dates.add(item['real_date'].strftime("%Y-%m-%d"))
+
+                days_list = sorted(list(valid_dates))
+                if not days_list:
+                    days_list = sorted(list(set([x.strftime("%Y-%m-%d") for x in target_dates_to_fetch])))
+
+                fig_sh, fig_sz = plot_intraday_charts(all_intraday_data, days_list, daily_df, chart_mode)
+
+                tab1, tab2 = st.tabs(["?? (SH)", "?? (SZ)"])
+                with tab1:
+                    if fig_sh:
+                        st.plotly_chart(fig_sh, use_container_width=True)
+                with tab2:
+                    if fig_sz:
+                        st.plotly_chart(fig_sz, use_container_width=True)
+
+        st.subheader(f"?? {selected_date.strftime('%Y?%m?%d?')} ???????")
+        fig = plot_market_heatmap(daily_df)
+        st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("????????"):
+            st.dataframe(
+                daily_df[['??', '??', '??', '???', '???']].style.format({
+                    '??': '{:.2f}',
+                    '???': '{:.2f}%',
+                    '???': '{:,.0f}'
+                }),
+                hide_index=True
+            )
+
+elif nav_option == "?? ??????":
+    st.subheader("?? ??????? (Alpha Divergence)")
+    st.info("?? **????**??????????????????????????????????\n\n?????? **?????** ? **??????**?????????????????????????")
+
+    available_dates = sorted(filtered_df['??'].dt.date.unique())
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
+        date_range_div = st.date_input(
+            "????",
+            value=[available_dates[-5] if len(available_dates) > 5 else available_dates[0], available_dates[-1]],
+            min_value=available_dates[0],
+            max_value=available_dates[-1],
+            key="divergence_date_input"
         )
-        target_hm_date = selected_dates_str[hm_date_idx]
-        st.info(f"当前展示日期: **{target_hm_date}**")
-        
-        daily_df = filtered_df[filtered_df['日期'] == pd.Timestamp(target_hm_date)]
-        
-        if not daily_df.empty:
-            fig_hm = plot_market_heatmap(daily_df)
-            st.plotly_chart(fig_hm, use_container_width=True)
+
+    target_dates_div = []
+    if len(date_range_div) == 2:
+        s_d, e_d = date_range_div
+        target_dates_div = [d for d in available_dates if s_d <= d <= e_d]
+
+    if not target_dates_div:
+        st.warning("??????????")
+        st.stop()
+
+    st.caption(f"??? {target_dates_div[0]} ? {target_dates_div[-1]}?? {len(target_dates_div)} ?????")
+
+    div_df, market_median_chg = calculate_deviation_data(filtered_df, target_dates_div)
+
+    if div_df.empty:
+        st.stop()
+
+    st.markdown("### ?? ????")
+    strategy_mode = st.radio(
+        "??????",
+        ["?? (????)", "??? ??/?? (????)", "?? ??/?? (???/??)", "?? ??/?? (????)"],
+        horizontal=True
+    )
+
+    filtered_div = filter_deviation_data(div_df, strategy_mode=strategy_mode)
+
+    col_m1, col_m2 = st.columns(2)
+    col_m1.metric("??(???)???", f"{market_median_chg:.2f}%")
+    col_m2.metric("????????", f"{len(filtered_div)} ?")
+
+    st.divider()
+
+    if not filtered_div.empty:
+        fig_scatter = plot_deviation_scatter(filtered_div, strategy_mode)
+        if fig_scatter:
+            st.plotly_chart(fig_scatter, use_container_width=True)
         else:
-            st.warning("该日期无数据。")
+            st.warning("??????????????")
     else:
-        st.warning("当前范围内无交易日数据。")
+        st.warning("??????????????")
 
+    col_list1, col_list2 = st.columns(2)
 
-# --- Tab 2: Deviation Analysis ---
-with tab2:
-    st.subheader("资金偏离度与相关性分析")
-    st.markdown("""
-    **偏离度定义**: 个股涨跌幅 - 指数涨跌幅 (反映个股强弱)
-    """)
-    
-    if len(selected_dates_str) < 2:
-        st.warning("需要至少 2 个交易日的数据来计算区间偏离度。")
-    else:
-        # Calculate Deviation
-        div_df, market_median_chg = calculate_deviation_data(full_df, selected_dates_str) # Pass correctly formatted dates
-        
-        if not div_df.empty:
-            # --- Strategy Selection ---
-            st.markdown("### 🔎 策略筛选")
-            strategy_mode = st.radio("选择筛选策略", 
-                                     ["默认 (全部展示)", 
-                                      "🛡️ 护盘/控盘 (逆势大票)", 
-                                      "🔥 游资/活跃 (高换手/高波)",
-                                      "☠️ 出货/砸盘 (放量下跌)"], 
-                                     horizontal=True)
-            
-            # Show Metrics
-            col_m1, col_m2 = st.metrics = st.columns(2)
-            col_m1.metric("基准(中位数)涨跌幅", f"{market_median_chg:.2f}%")
-            
-            # Apply Filter
-            filtered_div = filter_deviation_data(div_df, strategy_mode=strategy_mode)
-            
-            col_m2.metric("当前策略筛选数量", f"{len(filtered_div)} 只")
-            
-            # Plot Scatter
-            st.markdown("#### 资金偏离度分布")
-            fig_sc = plot_deviation_scatter(filtered_div, strategy_mode)
-            if fig_sc:
-                st.plotly_chart(fig_sc, use_container_width=True)
-            else:
-                st.info("当前筛选无数据。")
-            
-            # --- Data Tables (Buy/Sell) ---
-            st.divider()
-            col_list1, col_list2 = st.columns(2)
-            
-            with col_list1:
-                st.subheader("🔥 资金抱团 (向上偏离)")
-                # 逻辑：偏离度 > 0, 按成交额降序
-                buy_df = filtered_div[filtered_div['偏离度'] > 0].sort_values('成交额(亿)', ascending=False).head(50)
-                st.dataframe(
-                    buy_df[['代码', '名称', '偏离度', '成交额(亿)', '区间涨跌幅']].style.format({
-                        '偏离度': '+{:.2f}%',
-                        '成交额(亿)': '{:.1f}',
-                        '区间涨跌幅': '{:.2f}%'
-                    }),
-                    use_container_width=True,
-                    height=500
-                )
-                
-            with col_list2:
-                st.subheader("📉 资金出逃 (向下偏离)")
-                # 逻辑：偏离度 < 0, 按成交额降序
-                sell_df = filtered_div[filtered_div['偏离度'] < 0].sort_values('成交额(亿)', ascending=False).head(50)
-                st.dataframe(
-                    sell_df[['代码', '名称', '偏离度', '成交额(亿)', '区间涨跌幅']].style.format({
-                        '偏离度': '{:.2f}%',
-                        '成交额(亿)': '{:.1f}',
-                        '区间涨跌幅': '{:.2f}%'
-                    }),
-                    use_container_width=True,
-                    height=500
-                )
-        else:
-            st.info("无法计算偏离度数据，请检查数据完整性。")
+    with col_list1:
+        st.subheader("?? ???? (??????)")
+        buy_df = filtered_div[filtered_div['???'] > 0].sort_values('?????', ascending=False).head(20)
+        st.dataframe(
+            buy_df[['??', '??', '???', '???(?)', '?????']].style.format({
+                '???': '+{:.2f}%',
+                '???(?)': '{:.1f}',
+                '?????': '{:.2f}%'
+            }),
+            hide_index=True
+        )
 
-
-# --- Tab 3: Intraday Analysis ---
-with tab3:
-    st.subheader("分时走势深度复盘")
-    
-    # Intraday Controls
-    col_i1, col_i2 = st.columns([1, 3])
-    with col_i1:
-        id_days_n = st.number_input("查看最近N天分时", min_value=1, max_value=5, value=1)
-    
-    # Determine dates for intraday
-    # We take the LAST N dates from the selected_dates range
-    if len(selected_dates_str) >= id_days_n:
-        target_id_dates = selected_dates_str[-id_days_n:]
-    else:
-        target_id_dates = selected_dates_str
-        
-    with col_i2:
-        st.write(f"正在加载分时数据范围: {target_id_dates}")
-
-    # Stock Selection logic
-    # Default to top 5 deviation stocks if div_df exists
-    default_stocks = []
-    if 'filtered_div' in locals() and not filtered_div.empty:
-        default_stocks = filtered_div.head(3)['代码'].tolist()
-    
-    # User input for stocks
-    selected_stocks_text = st.text_input("输入股票代码 (逗号分隔)", value=",".join(default_stocks))
-    user_stocks = [s.strip() for s in selected_stocks_text.split(',') if s.strip()]
-    
-    # Intraday loader automatically fetches major indices (000300, 000001, 399001)
-    target_stock_codes = list(set(user_stocks))
-    
-    if st.button("🚀 加载分时图表"):
-        # Prepare Metadata for Names/Turnover (using latest available data)
-        if not full_df.empty:
-            meta_df = full_df.sort_values('日期').groupby('代码').tail(1).set_index('代码')
-            meta_map = meta_df[['名称', '成交额']].to_dict('index')
-        else:
-            meta_map = {}
-
-        # Construct arguments list [(code, name, turnover), ...]
-        fetch_args = []
-        known_indices = ["000300", "000001", "399001"]
-        
-        for c in target_stock_codes:
-            if c in known_indices: continue # Skip if user entered index code manually
-            
-            info = meta_map.get(c, {})
-            name = info.get('名称', c)
-            to_val = info.get('成交额', 0)
-            fetch_args.append((c, name, to_val))
-
-        all_intraday = []
-        progress_bar = st.progress(0)
-        
-        total_steps = len(target_id_dates)
-        
-        for i, d_str in enumerate(target_id_dates):
-            # Fetch for one day
-            day_data = fetch_intraday_data_v2(fetch_args, d_str)
-            all_intraday.extend(day_data)
-            progress_bar.progress((i + 1) / total_steps)
-            
-        progress_bar.empty()
-        
-        if all_intraday:
-            # Need daily_df for turnover info (optional context)
-            # Just grab the last day's daily_df for Context
-            if not filtered_df.empty:
-                last_daily_df = filtered_df[filtered_df['日期'] == pd.Timestamp(target_id_dates[-1])]
-            else:
-                 last_daily_df = pd.DataFrame(columns=['代码', '名称', '成交额'])
-
-            
-            fig_sh, fig_sz = plot_intraday_charts(all_intraday, target_id_dates, last_daily_df, selected_pool)
-            
-            if fig_sh: st.plotly_chart(fig_sh, use_container_width=True)
-            if fig_sz: st.plotly_chart(fig_sz, use_container_width=True)
-        else:
-            st.warning("未获取到分时数据。可能是非交易日或接口限制。")
-
-# Summary in Sidebar
-st.sidebar.markdown("---")
-st.sidebar.caption("v2.2 Modular - Refactored for Stability")
-st.sidebar.caption("Data source: AkShare (Sina/Eastmoney)")
+    with col_list2:
+        st.subheader("?? ???? (??????)")
+        sell_df = filtered_div[filtered_div['???'] < 0].sort_values('?????', ascending=False).head(20)
+        st.dataframe(
+            sell_df[['??', '??', '???', '???(?)', '?????']].style.format({
+                '???': '{:.2f}%',
+                '???(?)': '{:.1f}',
+                '?????': '{:.2f}%'
+            }),
+            hide_index=True
+        )

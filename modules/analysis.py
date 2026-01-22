@@ -69,10 +69,13 @@ def filter_deviation_data(div_df, strategy_mode="默认"):
         div_df = div_df[div_df['偏离度'] > 2.0]
     
     elif "游资" in strategy_mode:
+        # 游资: 偏离度绝对值 > 5.0
         div_df = div_df[div_df['偏离度'].abs() > 5.0]
         
     elif "出货" in strategy_mode:
+        # 出货: 成交额 > Median & 偏离度 < -3.0
         threshold_to = div_df['成交额(亿)'].quantile(0.5)
+        # Using bitwise operator for boolean indexing
         div_df = div_df[(div_df['成交额(亿)'] >= threshold_to) & (div_df['偏离度'] < -3.0)]
         
     return div_df

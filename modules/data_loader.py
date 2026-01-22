@@ -5,7 +5,6 @@ import streamlit as st
 import concurrent.futures
 import threading
 from datetime import datetime, timedelta
-import random
 import time
 
 from .config import STOCK_POOLS
@@ -155,7 +154,6 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
             except Exception:
                 pass
             return None
-
         # Use concurrency as in app1.py
         ctx = get_script_run_ctx()
         def fetch_one_stock_wrapper(code, name):
@@ -176,7 +174,7 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
                  res = future.result()
                  if res is not None:
                      new_data_list.append(res)
-                
+
         status_text.empty()
         progress_bar.empty()
         
@@ -233,6 +231,9 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
 def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
     """
     原子化获取单个标的的分时数据，独立缓存。
+    避免因股票列表组合变化导致整个缓存失效。
+    params:
+    period: '1', '5', '15', '30', '60'
     """
     start_time = f"{date_str} 09:30:00"
     end_time = f"{date_str} 15:00:00"
@@ -247,20 +248,40 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
     for attempt in range(max_retries):
         try:
             if is_index:
+                # 指数接口
                 df = ak.index_zh_a_hist_min_em(symbol=symbol, period=period, start_date=start_time, end_date=end_time)
             else:
+                # 个股接口
                 df = ak.stock_zh_a_hist_min_em(symbol=symbol, start_date=start_time, end_date=end_time, period=period, adjust='qfq')
             
             if df is not None and not df.empty:
+                # 成功 - 重置退避
+                if fetch_cached_min_data.current_backoff > 0:
+                     print(f"[{datetime.now().time()}] API 恢复。重置退避时间。")
+                     fetch_cached_min_data.current_backoff = 0
+
                 # 统一列名
                 if '时间' in df.columns:
                     df.rename(columns={'时间': 'time', '开盘': 'open', '收盘': 'close'}, inplace=True)
-                return df
+                
+                # 简单清洗
+                df['time'] = pd.to_datetime(df['time'])
+                
+                # 计算涨跌幅(相对于当日开盘)
+                base_price = df['open'].iloc[0]
+                df['pct_chg'] = (df['close'] - base_price) / base_price * 100
+                
+                return df[['time', 'pct_chg', 'close']]
                 
         except Exception:
-            time.sleep(1)
-            
-    return pd.DataFrame()
+            # 失败处理逻辑
+            if fetch_cached_min_data.current_backoff == 0:
+                fetch_cached_min_data.current_backoff = 60 # 初始 1 分钟
+            else:
+                fetch_cached_min_data.current_backoff *= 2 # 翻倍
+            pass
+
+    return None
 
 # --- 后台预取线程逻辑 ---
 @st.cache_data(ttl=3600*24, show_spinner=False)
