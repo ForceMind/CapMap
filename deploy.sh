@@ -2,6 +2,10 @@
 set -euo pipefail
 
 # 服务器一键部署脚本（中文）
+echo "========================================="
+echo "   CapMap 一键部署脚本"
+echo "========================================="
+
 APP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$APP_ROOT/app"
 VENV_DIR="$APP_ROOT/.venv"
@@ -35,45 +39,121 @@ BASE_PATH="${BASE_PATH#/}"
 
 echo "开始部署：端口=$PORT，二级地址=/$BASE_PATH/"
 
-PY_CMD=()
-if command -v python3 >/dev/null 2>&1; then
-  PY_CMD=(python3)
-elif command -v python >/dev/null 2>&1; then
-  PY_CMD=(python)
-elif command -v py >/dev/null 2>&1; then
-  PY_CMD=(py -3)
-else
-  echo "未找到 Python，请先安装 Python 3。"
-  exit 1
+OS_ID="unknown"
+OS_NAME="unknown"
+if [[ -f /etc/os-release ]]; then
+  . /etc/os-release
+  OS_ID="${ID:-unknown}"
+  OS_NAME="${NAME:-unknown}"
 fi
+echo "系统：$OS_NAME"
 
-"${PY_CMD[@]}" -m venv "$VENV_DIR"
-
-# 尝试安装 pip（兼容主流 Linux 发行版）
-if ! command -v pip3 >/dev/null 2>&1 && ! command -v pip >/dev/null 2>&1; then
-  if command -v dnf >/dev/null 2>&1; then
-    sudo dnf install -y python3-pip
-  elif command -v yum >/dev/null 2>&1; then
-    sudo yum install -y python3-pip
-  elif command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get update
-    sudo apt-get install -y python3-pip
-  elif command -v zypper >/dev/null 2>&1; then
-    sudo zypper -n install python3-pip
-  elif command -v pacman >/dev/null 2>&1; then
-    sudo pacman -Sy --noconfirm python-pip
-  elif command -v apk >/dev/null 2>&1; then
-    sudo apk add --no-cache py3-pip
-  else
-    "${PY_CMD[@]}" -m ensurepip --upgrade || true
+SUDO=""
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  if command -v sudo >/dev/null 2>&1; then
+    SUDO="sudo"
   fi
 fi
 
-OS_NAME="$(uname -s 2>/dev/null || echo unknown)"
-case "$OS_NAME" in
+need_root() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    if [[ -z "$SUDO" ]]; then
+      echo "缺少 sudo，无法安装系统依赖。请使用 root 或 sudo 运行此脚本。"
+      exit 1
+    fi
+  fi
+}
+
+install_python() {
+  need_root
+  if command -v dnf >/dev/null 2>&1; then
+    $SUDO dnf install -y python3.11 python3.11-pip python3.11-devel || $SUDO dnf install -y python3 python3-pip
+  elif command -v yum >/dev/null 2>&1; then
+    $SUDO yum install -y python3.11 python3.11-pip python3.11-devel || $SUDO yum install -y python3 python3-pip
+  elif command -v apt-get >/dev/null 2>&1; then
+    $SUDO apt-get update
+    $SUDO apt-get install -y python3.11 python3.11-venv python3.11-dev python3-pip || $SUDO apt-get install -y python3 python3-venv python3-pip
+  elif command -v zypper >/dev/null 2>&1; then
+    $SUDO zypper -n install python3 python3-pip
+  elif command -v pacman >/dev/null 2>&1; then
+    $SUDO pacman -Sy --noconfirm python python-pip
+  elif command -v apk >/dev/null 2>&1; then
+    $SUDO apk add --no-cache python3 py3-pip
+  else
+    echo "未找到可用的包管理器，请手动安装 Python 3.10+。"
+    exit 1
+  fi
+}
+
+pick_python() {
+  for c in python3.12 python3.11 python3.10 python3.9 python3 python; do
+    if command -v "$c" >/dev/null 2>&1; then
+      echo "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+check_python_version() {
+  "$1" - <<'PY' >/dev/null 2>&1
+import sys
+min_major, min_minor = 3, 10
+sys.exit(0 if (sys.version_info.major, sys.version_info.minor) >= (min_major, min_minor) else 1)
+PY
+}
+
+PYTHON_EXE="$(pick_python || true)"
+if [[ -z "$PYTHON_EXE" ]]; then
+  echo "未检测到 Python，尝试安装..."
+  install_python
+  PYTHON_EXE="$(pick_python || true)"
+fi
+
+if [[ -z "$PYTHON_EXE" ]]; then
+  echo "未找到 Python，请先安装 Python 3.10+。"
+  exit 1
+fi
+
+if ! check_python_version "$PYTHON_EXE"; then
+  echo "当前 Python 版本过低，尝试安装更高版本..."
+  install_python
+  PYTHON_EXE="$(pick_python || true)"
+  if [[ -z "$PYTHON_EXE" ]] || ! check_python_version "$PYTHON_EXE"; then
+    echo "Akshare 需要 Python 3.10+，当前不满足。"
+    exit 1
+  fi
+fi
+
+echo "使用 Python：$PYTHON_EXE"
+
+if ! "$PYTHON_EXE" -m venv "$VENV_DIR"; then
+  echo "venv 创建失败，尝试安装 venv 组件..."
+  need_root
+  VENV_PKG="python3-venv"
+  if [[ "$PYTHON_EXE" =~ ^python3\.[0-9]+$ ]]; then
+    VENV_PKG="${PYTHON_EXE}-venv"
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    $SUDO apt-get update
+    $SUDO apt-get install -y "$VENV_PKG" || $SUDO apt-get install -y python3-venv
+  elif command -v dnf >/dev/null 2>&1; then
+    $SUDO dnf install -y python3-venv || true
+  elif command -v yum >/dev/null 2>&1; then
+    $SUDO yum install -y python3-venv || true
+  fi
+  "$PYTHON_EXE" -m venv "$VENV_DIR" || { echo "venv 创建失败。"; exit 1; }
+fi
+
+OS_NAME_SHORT="$(uname -s 2>/dev/null || echo unknown)"
+case "$OS_NAME_SHORT" in
   MINGW*|MSYS*|CYGWIN*) VENV_BIN="$VENV_DIR/Scripts" ;;
   *) VENV_BIN="$VENV_DIR/bin" ;;
 esac
+
+if [[ ! -x "$VENV_BIN/pip" ]]; then
+  "$VENV_BIN/python" -m ensurepip --upgrade || true
+fi
 
 PIP_ARGS=()
 if [[ -n "$PIP_INDEX_URL" ]]; then
@@ -144,3 +224,4 @@ EOF
 
 chmod +x "$APP_ROOT/run.sh" "$APP_ROOT/stop.sh"
 echo "部署完成。运行：$APP_ROOT/run.sh"
+

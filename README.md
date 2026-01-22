@@ -16,6 +16,9 @@
    ./run.sh
    ```
 
+## Python 版本要求
+Akshare 需要 Python 3.10+，脚本会自动检测并尝试安装更高版本。
+
 ## 修改端口或二级地址
 可用环境变量直接指定：
 ```bash
@@ -30,10 +33,6 @@ PORT=8501 BASE_PATH=capmap ./deploy.sh
 PIP_INDEX_URL=https://pypi.org/simple ./deploy.sh
 ```
 
-## 跨系统虚拟环境
-脚本自动选择 `python3` / `python` / `py -3` 创建虚拟环境，
-适配 Linux/macOS/Windows（Git Bash）。
-
 ## Nginx 二级地址反代
 把 `nginx_subpath.conf` 片段加入现有 Nginx 配置，
 并确保 `BASE_PATH` 与 location 路径一致（如 `/capmap/`）。
@@ -42,3 +41,4 @@ PIP_INDEX_URL=https://pypi.org/simple ./deploy.sh
 ```bash
 ./stop.sh
 ```
+
