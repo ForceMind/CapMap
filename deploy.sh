@@ -49,6 +49,26 @@ fi
 
 "${PY_CMD[@]}" -m venv "$VENV_DIR"
 
+# 尝试安装 pip（兼容主流 Linux 发行版）
+if ! command -v pip3 >/dev/null 2>&1 && ! command -v pip >/dev/null 2>&1; then
+  if command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y python3-pip
+  elif command -v yum >/dev/null 2>&1; then
+    sudo yum install -y python3-pip
+  elif command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update
+    sudo apt-get install -y python3-pip
+  elif command -v zypper >/dev/null 2>&1; then
+    sudo zypper -n install python3-pip
+  elif command -v pacman >/dev/null 2>&1; then
+    sudo pacman -Sy --noconfirm python-pip
+  elif command -v apk >/dev/null 2>&1; then
+    sudo apk add --no-cache py3-pip
+  else
+    "${PY_CMD[@]}" -m ensurepip --upgrade || true
+  fi
+fi
+
 OS_NAME="$(uname -s 2>/dev/null || echo unknown)"
 case "$OS_NAME" in
   MINGW*|MSYS*|CYGWIN*) VENV_BIN="$VENV_DIR/Scripts" ;;
