@@ -10,7 +10,81 @@ import time
 from .config import STOCK_POOLS
 from .utils import with_retry, get_start_date, add_script_run_ctx, get_script_run_ctx
 
-def fetch_history_data(pool_name="沪深300 (大盘)"):
+
+def log_info(message):
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] {message}")
+
+
+def build_fetch_plan(pool_name, max_workers, request_delay, fetch_spot):
+    config = STOCK_POOLS.get(pool_name, STOCK_POOLS["沪深300 (大盘)"])
+    cache_file = config["cache"]
+    index_code = config["code"]
+
+    cached_df = pd.DataFrame()
+    last_cached_date = None
+    cached_rows = 0
+
+    if os.path.exists(cache_file):
+        try:
+            cached_df = pd.read_parquet(cache_file)
+            if not cached_df.empty:
+                last_cached_date = cached_df['日期'].max().date()
+                cached_rows = len(cached_df)
+        except Exception:
+            pass
+
+    today = datetime.now().date()
+    if last_cached_date:
+        start_date_str = (last_cached_date + timedelta(days=1)).strftime("%Y%m%d")
+    else:
+        start_date_str = get_start_date(2)
+    end_date_str = today.strftime("%Y%m%d")
+
+    total_stocks = None
+    try:
+        cons_df = with_retry(lambda: ak.index_stock_cons(symbol=index_code), retries=3, delay=1.0)
+        if cons_df is not None and not cons_df.empty:
+            if 'variety' in cons_df.columns:
+                code_col = 'variety'
+            elif '品种代码' in cons_df.columns:
+                code_col = '品种代码'
+            else:
+                code_col = cons_df.columns[0]
+            total_stocks = len(cons_df[code_col].tolist())
+    except Exception:
+        total_stocks = None
+
+    needs_update = start_date_str <= end_date_str
+    avg_req_seconds = 0.4
+    est_seconds = None
+    if total_stocks:
+        est_seconds = (total_stocks * (request_delay + avg_req_seconds)) / max(1, max_workers)
+
+    return {
+        "pool_name": pool_name,
+        "index_code": index_code,
+        "cache_file": cache_file,
+        "has_cache": not cached_df.empty,
+        "cached_rows": cached_rows,
+        "last_cached_date": last_cached_date,
+        "start_date_str": start_date_str,
+        "end_date_str": end_date_str,
+        "total_stocks": total_stocks,
+        "needs_update": needs_update,
+        "max_workers": max_workers,
+        "request_delay": request_delay,
+        "fetch_spot": fetch_spot,
+        "est_seconds": est_seconds
+    }
+
+def fetch_history_data(
+    pool_name="沪深300 (大盘)",
+    allow_download=True,
+    max_workers=10,
+    request_delay=0.0,
+    fetch_spot=True
+):
     """
     获取指定成分股过去2年的日线数据。
     逻辑复刻自 app1.py (稳定版)，支持多指数池。
@@ -29,9 +103,17 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
             if not cached_df.empty:
                 last_cached_date = cached_df['日期'].max().date()
                 st.toast(f"✅ 已加载本地缓存 [{pool_name}]，最新日期: {last_cached_date}")
+                log_info(f"读取缓存成功: {pool_name} | 最新日期 {last_cached_date} | 行数 {len(cached_df)}")
         except Exception as e:
             st.error(f"读取缓存文件失败: {e}")
+            log_info(f"读取缓存失败: {pool_name} | {e}")
 
+    if not allow_download:
+        log_info(f"已关闭自动拉取: {pool_name} | 仅使用缓存")
+        return cached_df
+
+    max_workers = max(1, int(max_workers))
+    request_delay = max(0.0, float(request_delay))
     # 2. 计算需要下载的时间范围
     today = datetime.now().date()
     
@@ -61,6 +143,7 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
             status_text.text(f"正在检查增量数据 ({start_date_str} - {end_date_str})...")
 
         # 获取成分股列表
+        log_info(f"开始获取成分股列表: {pool_name} | 接口 index_stock_cons({index_code})")
         status_text.text(f"正在获取 [{pool_name}] 成分股列表...")
         try:
             # 增加重试
@@ -89,29 +172,34 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
         
         # --- 尝试获取今日实时数据 (Spot) ---
         today_spot_map = {}
-        try:
-            # Low frequency
-            spot_df = ak.stock_zh_a_spot_em()
-            if spot_df is not None and not spot_df.empty:
-                spot_df['代码'] = spot_df['代码'].astype(str)
-                
-                # 1. 更新名称映射
-                new_names = dict(zip(spot_df['代码'], spot_df['名称']))
-                stock_names.update(new_names)
-                
-                # 2. 准备今日数据映射
-                if end_date_str >= start_date_str:
-                    today_spot_map = spot_df.set_index('代码').to_dict('index')
-        except Exception as e:
-            # 非致命错误
-            print(f"Update spots failed: {e}")
+        if fetch_spot:
+            try:
+                log_info(f"开始获取盘中补全: {pool_name} | 接口 stock_zh_a_spot_em")
+                # Low frequency
+                spot_df = ak.stock_zh_a_spot_em()
+                if spot_df is not None and not spot_df.empty:
+                    spot_df['代码'] = spot_df['代码'].astype(str)
+                    
+                    # 1. 更新名称映射
+                    new_names = dict(zip(spot_df['代码'], spot_df['名称']))
+                    stock_names.update(new_names)
+                    
+                    # 2. 准备今日数据映射
+                    if end_date_str >= start_date_str:
+                        today_spot_map = spot_df.set_index('代码').to_dict('index')
+            except Exception as e:
+                # 非致命错误
+                print(f"Update spots failed: {e}")
 
         new_data_list = []
         total_stocks = len(stock_list)
+        log_info(f"开始获取日线: {pool_name} | 股票数 {total_stocks} | 线程 {max_workers} | 延迟 {request_delay}s")
 
         # 循环获取历史
         def fetch_one_stock(code, name):
             try:
+                if request_delay > 0:
+                    time.sleep(request_delay)
                 # 获取日线
                 df_hist = ak.stock_zh_a_hist(symbol=code, start_date=start_date_str, end_date=end_date_str, adjust="qfq")
                 
@@ -160,23 +248,33 @@ def fetch_history_data(pool_name="沪深300 (大盘)"):
             if ctx:
                 add_script_run_ctx(threading.current_thread(), ctx)
             return fetch_one_stock(code, name)
-
-        # 恢复 app1.py 的 max_workers=10
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-             future_map = {executor.submit(fetch_one_stock_wrapper, c, stock_names.get(c, c)): c for c in stock_list}
-             
-             for i, future in enumerate(concurrent.futures.as_completed(future_map)):
-                 # Update progress
-                 if i % 10 == 0:
-                     progress_bar.progress((i + 1) / total_stocks)
-                     status_text.text(f"正在同步数据 [{pool_name}]: {i+1}/{total_stocks}")
+        if max_workers <= 1:
+            for i, code in enumerate(stock_list):
+                if request_delay > 0:
+                    time.sleep(request_delay)
+                name = stock_names.get(code, code)
+                res = fetch_one_stock(code, name)
+                if res is not None:
+                    new_data_list.append(res)
+                if i % 10 == 0:
+                    progress_bar.progress((i + 1) / total_stocks)
+                    status_text.text(f"?????? [{pool_name}]: {i+1}/{total_stocks}")
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                 future_map = {executor.submit(fetch_one_stock_wrapper, c, stock_names.get(c, c)): c for c in stock_list}
                  
-                 res = future.result()
-                 if res is not None:
-                     new_data_list.append(res)
-
+                 for i, future in enumerate(concurrent.futures.as_completed(future_map)):
+                     # Update progress
+                     if i % 10 == 0:
+                         progress_bar.progress((i + 1) / total_stocks)
+                         status_text.text(f"?????? [{pool_name}]: {i+1}/{total_stocks}")
+                     
+                     res = future.result()
+                     if res is not None:
+                         new_data_list.append(res)
         status_text.empty()
         progress_bar.empty()
+        log_info(f"完成日线获取: {pool_name} | 新批次数 {len(new_data_list)}")
         
         # 合并逻辑
         if new_data_list:
@@ -352,23 +450,21 @@ def background_prefetch_task(date_list, origin_df):
     print("[后台任务] 所有任务已完成。")
 
 
-def fetch_intraday_data_v2(stock_codes, target_date_str, period='1'):
+def fetch_intraday_data_v2(stock_codes, target_date_str, period='1', max_workers=1, request_delay=0.0):
     """
-    获取指定股票列表 + 三大指数 的分钟级数据 (并发版)。
+    ???????? + ???? ?????? (???)?
     """
-    results = [] 
+    results = []
+    log_info(f"开始获取分时: {target_date_str} | 标的数 {len(stock_codes)} | 周期 {period} | 线程 {max_workers} | 延迟 {request_delay}s")
     
-    # 定义需要获取的指数
     indices_map = {
-        "000300": "📊 沪深300",
-        "000001": "📈 上证指数",
-        "399001": "📉 深证成指"
+        '000300': '??300',
+        '000001': '????',
+        '399001': '????'
     }
 
-    # 任务列表
     tasks = []
 
-    # 1. 提交指数任务
     for idx_code, idx_name in indices_map.items():
         tasks.append({
             'type': 'index',
@@ -377,7 +473,6 @@ def fetch_intraday_data_v2(stock_codes, target_date_str, period='1'):
             'to_val': 99999999999
         })
 
-    # 2. 提交个股任务
     for code, name, to_val in stock_codes:
         tasks.append({
             'type': 'stock',
@@ -385,36 +480,43 @@ def fetch_intraday_data_v2(stock_codes, target_date_str, period='1'):
             'name': name,
             'to_val': to_val
         })
-        
+
     def _worker(task):
         try:
             is_index = (task['type'] == 'index')
+            if request_delay > 0:
+                time.sleep(request_delay)
             data = fetch_cached_min_data(task['code'], target_date_str, is_index=is_index, period=period)
             if data is not None:
                 return {
-                    'code': task['code'],
-                    'name': task['name'],
-                    'data': data,
-                    'turnover': task['to_val'],
-                    'is_index': is_index
+                    'code': task['code']
+                    , 'name': task['name']
+                    , 'data': data
+                    , 'turnover': task['to_val']
+                    , 'is_index': is_index
                 }
         except Exception:
             pass
         return None
 
-    # 并发执行
     ctx = get_script_run_ctx()
     def _worker_wrapper(t):
         if ctx:
             add_script_run_ctx(threading.current_thread(), ctx)
         return _worker(t)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
-        future_to_task = {executor.submit(_worker_wrapper, t): t for t in tasks}
-        
-        for future in concurrent.futures.as_completed(future_to_task):
-            res = future.result()
+    if max_workers <= 1:
+        for t in tasks:
+            res = _worker(t)
             if res:
                 results.append(res)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_task = {executor.submit(_worker_wrapper, t): t for t in tasks}
             
+            for future in concurrent.futures.as_completed(future_to_task):
+                res = future.result()
+                if res:
+                    results.append(res)
+
     return results

@@ -1,17 +1,17 @@
-﻿import streamlit as st
+import streamlit as st
 import pandas as pd
 from datetime import datetime
 import os
 import threading
 
 from modules.config import STOCK_POOLS
-from modules.data_loader import fetch_history_data, fetch_intraday_data_v2, background_prefetch_task
+from modules.data_loader import fetch_history_data, fetch_intraday_data_v2, background_prefetch_task, build_fetch_plan
 from modules.analysis import calculate_deviation_data, filter_deviation_data
 from modules.visualization import plot_market_heatmap, plot_deviation_scatter, plot_intraday_charts
 from modules.utils import add_script_run_ctx
 
 st.set_page_config(
-    page_title="A股历史盘面回放系统",
+    page_title="A股资金全景分析",
     page_icon="⏪",
     layout="wide"
 )
@@ -77,7 +77,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🛠️ 板块过滤")
     filter_cyb = st.checkbox("屏蔽创业板 (300开头)", value=False)
-    filter_kcb = st.checkbox("屏蔽科创板 (688开头)", value=False)
+    filter_kcb = st.checkbox("????? (688??)", value=True)
 
     st.markdown("---")
     nav_option = st.radio(
@@ -86,8 +86,60 @@ with st.sidebar:
         index=0
     )
 
+    st.markdown("---")
+    st.header("⏯️ 拉取控制")
+    auto_fetch = st.checkbox("自动拉取历史数据", value=True)
+    max_workers = st.slider("并发线程数", min_value=1, max_value=20, value=10)
+    request_delay = st.slider("请求间隔(秒)", min_value=0.0, max_value=1.0, value=0.0, step=0.05)
+    fetch_spot = st.checkbox("盘中补全(Spot)", value=True)
+    manual_fetch = False
+    if not auto_fetch:
+        manual_fetch = st.button("开始拉取/刷新")
+
+allow_download = auto_fetch or manual_fetch
+confirm_key = f"fetch_confirmed_{selected_pool}"
+
+if allow_download:
+    plan = build_fetch_plan(selected_pool, max_workers, request_delay, fetch_spot)
+    if plan["needs_update"]:
+        if not st.session_state.get(confirm_key):
+            if plan["est_seconds"]:
+                est_text = f"{int(plan['est_seconds'])} 秒(估算)"
+            else:
+                est_text = "未知"
+            plan_lines = [
+                f"指数池: {plan['pool_name']} (代码 {plan['index_code']})",
+                f"缓存文件: {plan['cache_file']}",
+                f"已有缓存: {'是' if plan['has_cache'] else '否'} | 记录数 {plan['cached_rows']}",
+                f"拉取区间: {plan['start_date_str']} - {plan['end_date_str']}",
+                "接口说明:",
+                "- index_stock_cons: 指数成分股列表",
+                "- stock_zh_a_hist: 个股日K历史（主请求，易限频）",
+                f"- stock_zh_a_spot_em: ???????{('?????' if plan['fetch_spot'] else '?????')}",
+                "- 分时接口(如勾选分时图): stock_zh_a_hist_min_em / index_zh_a_hist_min_em",
+                f"股票数量: {plan['total_stocks'] if plan['total_stocks'] is not None else '未知'}",
+                f"线程数: {plan['max_workers']} | 请求间隔: {plan['request_delay']} 秒",
+                f"预计耗时: {est_text}"
+            ]
+            st.warning("即将拉取数据，请确认是否继续：\n\n" + "\n".join([f"- {line}" for line in plan_lines]))
+            if st.button("继续拉取"):
+                st.session_state[confirm_key] = True
+                st.rerun()
+            st.stop()
+    else:
+        allow_download = False
+
 with st.spinner(f"正在初始化 [{selected_pool}] 历史数据仓库..."):
-    origin_df = fetch_history_data(selected_pool)
+    origin_df = fetch_history_data(
+        selected_pool,
+        allow_download=allow_download,
+        max_workers=max_workers,
+        request_delay=request_delay,
+        fetch_spot=fetch_spot
+    )
+
+if confirm_key in st.session_state:
+    st.session_state[confirm_key] = False
 
 # --- 后台任务检测与控制 ---
 bg_thread = None
@@ -138,7 +190,7 @@ if filtered_df.empty:
     st.stop()
 
 if nav_option == "📊 盘面回放":
-    st.title(f"A股历史盘面回放 - {selected_pool} (Market Replay)")
+    st.title(f"A股资金全景分析 - {selected_pool}")
     st.markdown(
         "> 🕹️ **操作指南**：\n"
         "> 1. 等待数据初始化完成（初次运行可能需要 2-3 分钟）。\n"
@@ -202,6 +254,11 @@ if nav_option == "📊 盘面回放":
 
         target_dates = [available_dates[st.session_state.selected_date_idx]]
         selected_date = target_dates[0]
+    if "last_selected_date" not in st.session_state:
+        st.session_state.last_selected_date = selected_date
+    if st.session_state.last_selected_date != selected_date:
+        st.session_state["show_intraday"] = False
+        st.session_state.last_selected_date = selected_date
 
     else:
         with mode_col2:
@@ -307,7 +364,13 @@ if nav_option == "📊 盘面回放":
                 fetch_progress.progress((i + 1) / total_steps)
 
                 d_str = d_date.strftime("%Y-%m-%d")
-                day_results = fetch_intraday_data_v2(target_stocks_list, d_str, period=period_to_use)
+                day_results = fetch_intraday_data_v2(
+                    target_stocks_list,
+                    d_str,
+                    period=period_to_use,
+                    max_workers=max_workers,
+                    request_delay=request_delay
+                )
 
                 for res in day_results:
                     res['data']['date_col'] = d_str
