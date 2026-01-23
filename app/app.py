@@ -10,6 +10,9 @@ import os
 import concurrent.futures
 import threading
 import sys
+import io
+import zipfile
+import shutil
 
 # 尝试导入 Streamlit 上下文管理器，用于解决多线程 "missing ScriptRunContext" 警告
 try:
@@ -30,6 +33,78 @@ st.set_page_config(
 # -----------------------------------------------------------------------------
 
 CACHE_FILE = "data/csi300_history_cache.parquet"
+MIN_CACHE_DIR = "data/min_cache"
+
+def _normalize_date_str(date_str):
+    try:
+        dt = pd.to_datetime(date_str)
+        return dt.strftime("%Y-%m-%d"), dt.strftime("%Y%m%d")
+    except Exception:
+        s = str(date_str)
+        return s, s.replace("-", "")
+
+def _min_cache_path(symbol, date_key, period, is_index):
+    kind = "index" if is_index else "stock"
+    return os.path.join(MIN_CACHE_DIR, f"p{period}", kind, str(symbol), f"{date_key}.csv")
+
+def _read_min_cache(path):
+    if os.path.exists(path):
+        try:
+            return pd.read_csv(path, parse_dates=["time"])
+        except Exception as e:
+            print(f"读取分时缓存失败: {e}")
+    return None
+
+def _write_min_cache(path, df):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = f"{path}.tmp"
+        df.to_csv(tmp_path, index=False)
+        os.replace(tmp_path, path)
+    except Exception as e:
+        print(f"保存分时缓存失败: {e}")
+
+def build_data_backup_zip():
+    data_dir = "data"
+    if not os.path.isdir(data_dir):
+        return None
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(data_dir):
+            for name in files:
+                abs_path = os.path.join(root, name)
+                rel_path = os.path.relpath(abs_path, data_dir)
+                zf.write(abs_path, os.path.join("data", rel_path))
+    buf.seek(0)
+    return buf.read()
+
+def restore_data_backup(uploaded_file):
+    data_dir = "data"
+    os.makedirs(data_dir, exist_ok=True)
+    uploaded_file.seek(0)
+    restored = 0
+    with zipfile.ZipFile(uploaded_file) as zf:
+        for member in zf.infolist():
+            name = member.filename.replace("\\", "/")
+            if name.endswith("/"):
+                continue
+            if name.startswith("/") or ".." in name.split("/"):
+                continue
+            parts = name.split("/")
+            if parts and parts[0] == "data":
+                parts = parts[1:]
+            if not parts:
+                continue
+            dest_path = os.path.join(data_dir, *parts)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            with zf.open(member) as src, open(dest_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            restored += 1
+    return restored
+
+def clear_min_cache():
+    if os.path.isdir(MIN_CACHE_DIR):
+        shutil.rmtree(MIN_CACHE_DIR, ignore_errors=True)
 
 def get_start_date(years_back=2):
     """计算 N 年前的日期，返回 YYYYMMDD 字符串"""
@@ -294,8 +369,14 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
     params:
     period: '1', '5', '15', '30', '60'
     """
-    start_time = f"{date_str} 09:30:00"
-    end_time = f"{date_str} 15:00:00"
+    date_str_norm, date_key = _normalize_date_str(date_str)
+    cache_path = _min_cache_path(symbol, date_key, period, is_index)
+    cached_df = _read_min_cache(cache_path)
+    if cached_df is not None and not cached_df.empty:
+        return cached_df
+
+    start_time = f"{date_str_norm} 09:30:00"
+    end_time = f"{date_str_norm} 15:00:00"
     
     # 指数退避策略全局变量 (简单模拟，实际环境应用类封装)
     # 使用函数属性暂存状态
@@ -333,7 +414,9 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
                 base_price = df['open'].iloc[0]
                 df['pct_chg'] = (df['close'] - base_price) / base_price * 100
                 
-                return df[['time', 'pct_chg', 'close']]
+                result = df[['time', 'pct_chg', 'close']].copy()
+                _write_min_cache(cache_path, result)
+                return result
                 
         except Exception as e:
             # 失败处理逻辑
@@ -541,18 +624,54 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"操作失败: {e}")
 
-        # 2. 清理分时缓存
-        if st.button("🧹 清空分时图缓存"):
+        # 2. 清理分时缓存（内存）
+        if st.button("🧹 清空分时图内存缓存"):
             st.cache_data.clear()
-            st.toast("✅ 所有内存缓存已清空，下次查看分时图将重新下载。")
+            st.toast("✅ 内存缓存已清空，磁盘缓存保留。")
 
-        # 3. 硬重置
+        # 3. 删除本地分时缓存
+        if st.button("🗑️ 删除本地分时缓存"):
+            clear_min_cache()
+            st.cache_data.clear()
+            st.toast("✅ 本地分时缓存已删除。")
+
+        # 4. 彻底重置
         if st.button("🚨 彻底重置 (删除所有)"):
             if os.path.exists(CACHE_FILE):
                 os.remove(CACHE_FILE)
-                st.toast("已删除本地所有历史数据。")
+                st.toast("已删除历史日线缓存。")
+            clear_min_cache()
             st.cache_data.clear()
             st.rerun()
+
+    with st.expander("💾 数据备份与恢复", expanded=False):
+        st.caption("备份 data 目录（历史日线 + 分时缓存）")
+        if st.button("📦 生成备份", key="backup_build"):
+            data_bytes = build_data_backup_zip()
+            if data_bytes:
+                st.session_state["backup_zip"] = data_bytes
+                st.session_state["backup_name"] = f"capmap_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+                st.toast("✅ 备份已生成")
+            else:
+                st.warning("没有可备份的数据。")
+        if "backup_zip" in st.session_state:
+            st.download_button(
+                "⬇️ 下载备份",
+                data=st.session_state["backup_zip"],
+                file_name=st.session_state.get("backup_name", "capmap_data_backup.zip"),
+                mime="application/zip",
+                key="backup_download",
+            )
+
+        uploaded = st.file_uploader("恢复备份（.zip）", type=["zip"], key="backup_upload")
+        if uploaded is not None and st.button("♻️ 恢复备份", key="backup_restore"):
+            try:
+                restored = restore_data_backup(uploaded)
+                st.cache_data.clear()
+                st.toast(f"✅ 已恢复 {restored} 个文件")
+                st.rerun()
+            except Exception as e:
+                st.error(f"恢复失败: {e}")
 
     st.info("数据源：沪深300成分股 (AkShare)")
     st.caption("注：方块大小使用'成交额'代替'市值'，\n反映当日交易热度。")
@@ -828,7 +947,7 @@ if not origin_df.empty:
         st.caption(f"注：这里的排名是基于 **{selected_date}** 当日的数据计算的。如果是多日模式，则展示这些股票在过去几天的走势。")
         st.caption("注：指数贡献 = 涨跌幅 × 权重(近似为成交额/市值占比)。此模式能看到是谁在拉动或砸盘。")
 
-        show_intraday = st.checkbox("加载分时走势 (需从网络实时拉取)", value=False)
+        show_intraday = st.checkbox("加载分时走势 (本地优先，无则网络拉取)", value=False)
         
         if show_intraday:
             # 使用 placeholder 放置进度条，避免组件销毁导致的索引错乱
