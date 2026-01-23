@@ -52,7 +52,16 @@ NGINX_SETUP=yes NGINX_PORT=80 NGINX_SERVER_NAME=_ ./deploy.sh
 tail -f logs/streamlit.out
 ```
 
+## 数据缓存与备份
+日线缓存：`data/csi300_history_cache.parquet`。
+分时缓存：`data/min_cache/`（按日期/周期自动保存，避免重复拉取）。
+侧边栏提供“数据备份与恢复”，可生成 zip 下载，迁移时上传恢复。
+
+
 ## 启动控制台（可选）
+控制台口令就是你自己设置的 `PANEL_TOKEN`，用于访问控制台页面。
+建议设置强口令并妥善保存。未设置口令时不会启动控制台。
+
 控制台用于在网页中启动/停止 Streamlit，无需登录终端。
 
 通过 deploy.sh 启动（推荐）：
@@ -71,3 +80,4 @@ PANEL_TOKEN=your_token control_panel/run_panel.sh
 ```bash
 control_panel/stop_panel.sh
 ```
+控制台日志：`logs/panel.out`

@@ -40,7 +40,7 @@ def _is_running():
 
 def _tail_log(path, max_lines=120, max_bytes=20000):
     if not os.path.exists(path):
-        return "Log file not found."
+        return "日志文件不存在。"
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
@@ -48,9 +48,9 @@ def _tail_log(path, max_lines=120, max_bytes=20000):
             f.seek(max(0, size - max_bytes))
             data = f.read().decode("utf-8", errors="replace")
         lines = data.splitlines()[-max_lines:]
-        return "\n".join(lines) if lines else "Log is empty."
+        return "\n".join(lines) if lines else "日志为空。"
     except Exception as e:
-        return f"Failed to read log: {e}"
+        return f"读取日志失败: {e}"
 
 
 def _run_cmd(cmd):
@@ -83,15 +83,15 @@ def _html_page(query):
     token_q = ""
     if TOKEN and query and "token" in query:
         token_q = f"?token={query['token'][0]}"
-    running_text = "RUNNING" if status["running"] else "STOPPED"
+    running_text = "运行中" if status["running"] else "未运行"
     pid_text = f"PID: {status['pid']}" if status["running"] else ""
     log_text = _tail_log(LOG_FILE)
 
     return f"""<!doctype html>
-<html lang="en">
+<html lang="zh">
 <head>
   <meta charset="utf-8" />
-  <title>CapMap Control Panel</title>
+  <title>CapMap 启动控制台</title>
   <style>
     body {{ font-family: Arial, sans-serif; padding: 24px; max-width: 900px; margin: 0 auto; }}
     .status {{ padding: 12px; background: #f3f5f7; border-radius: 8px; }}
@@ -104,23 +104,23 @@ def _html_page(query):
   </style>
 </head>
 <body>
-  <h1>CapMap Control Panel</h1>
+  <h1>CapMap 启动控制台</h1>
   <div class="status">
-    <div><strong>Streamlit:</strong> {running_text} {pid_text}</div>
-    <div><small>Tip: run deploy.sh first to generate run.sh / stop.sh.</small></div>
+    <div><strong>Streamlit 状态：</strong> {running_text} {pid_text}</div>
+    <div><small>提示：请先运行 deploy.sh 生成 run.sh / stop.sh。</small></div>
   </div>
   <p>
     <form method="post" action="/start{token_q}" style="display:inline">
-      <button class="btn start" type="submit">Start</button>
+      <button class="btn start" type="submit">启动</button>
     </form>
     <form method="post" action="/stop{token_q}" style="display:inline">
-      <button class="btn stop" type="submit">Stop</button>
+      <button class="btn stop" type="submit">停止</button>
     </form>
     <form method="post" action="/restart{token_q}" style="display:inline">
-      <button class="btn restart" type="submit">Restart</button>
+      <button class="btn restart" type="submit">重启</button>
     </form>
   </p>
-  <h3>Recent Log</h3>
+  <h3>最近日志</h3>
   <pre>{log_text}</pre>
 </body>
 </html>"""
@@ -137,7 +137,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auth_or_403(self, query):
         if not _auth_ok(query, self.headers):
-            self._send(403, "Forbidden")
+            self._send(403, "无权限")
             return False
         return True
 
@@ -151,7 +151,7 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/status":
             self._send(200, json.dumps(_status_payload()), "application/json")
         else:
-            self._send(404, "Not Found")
+            self._send(404, "未找到")
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -161,43 +161,43 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/start":
             if not os.path.exists(RUN_SCRIPT):
-                self._send(400, "run.sh not found; run deploy.sh first.")
+                self._send(400, "未找到 run.sh，请先运行 deploy.sh。")
                 return
             if _is_running():
-                self._send(200, "Streamlit is already running.")
+                self._send(200, "Streamlit 已在运行。")
                 return
             _run_cmd(["bash", RUN_SCRIPT])
-            self._send(200, "Started.")
+            self._send(200, "已启动。")
             return
 
         if parsed.path == "/stop":
             if not os.path.exists(STOP_SCRIPT):
-                self._send(400, "stop.sh not found; run deploy.sh first.")
+                self._send(400, "未找到 stop.sh，请先运行 deploy.sh。")
                 return
             if not _is_running():
-                self._send(200, "Streamlit is not running.")
+                self._send(200, "Streamlit 未运行。")
                 return
             _run_cmd(["bash", STOP_SCRIPT])
-            self._send(200, "Stopped.")
+            self._send(200, "已停止。")
             return
 
         if parsed.path == "/restart":
             if not os.path.exists(RUN_SCRIPT) or not os.path.exists(STOP_SCRIPT):
-                self._send(400, "run.sh/stop.sh not found; run deploy.sh first.")
+                self._send(400, "未找到 run.sh/stop.sh，请先运行 deploy.sh。")
                 return
             if _is_running():
                 _run_cmd(["bash", STOP_SCRIPT])
                 time.sleep(1)
             _run_cmd(["bash", RUN_SCRIPT])
-            self._send(200, "Restarted.")
+            self._send(200, "已重启。")
             return
 
-        self._send(404, "Not Found")
+        self._send(404, "未找到")
 
 
 def main():
     httpd = HTTPServer((HOST, PORT), Handler)
-    print(f"Control panel: http://{HOST}:{PORT}/")
+    print(f"控制台已启动: http://{HOST}:{PORT}/")
     httpd.serve_forever()
 
 
