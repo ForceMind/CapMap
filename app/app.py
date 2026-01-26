@@ -40,6 +40,28 @@ NAME_REFRESH_FILE = "data/name_refresh.json"
 NAME_REFRESH_TTL_HOURS = 24 * 180
 NAME_REFRESH_MIN_INTERVAL_MINUTES = 30
 NAME_MAP_VERSION = 1
+CODE_COL_CANDIDATES = [
+    "\u4ee3\u7801",
+    "\u8bc1\u5238\u4ee3\u7801",
+    "\u54c1\u79cd\u4ee3\u7801",
+    "variety",
+    "symbol",
+    "code",
+]
+NAME_COL_CANDIDATES = [
+    "\u540d\u79f0",
+    "\u8bc1\u5238\u7b80\u79f0",
+    "\u54c1\u79cd\u540d\u79f0",
+    "name",
+    "\u80a1\u7968\u7b80\u79f0",
+    "\u80a1\u7968\u540d\u79f0",
+]
+NAME_ITEM_CANDIDATES = [
+    "\u80a1\u7968\u7b80\u79f0",
+    "\u80a1\u7968\u540d\u79f0",
+    "\u8bc1\u5238\u7b80\u79f0",
+    "\u540d\u79f0",
+]
 
 def _normalize_date_str(date_str):
     try:
@@ -110,6 +132,71 @@ def _save_name_map(name_map):
     except Exception as e:
         print(f"保存名称映射失败: {e}")
 
+def _resolve_code_name_columns(df):
+    if df is None or df.empty:
+        return None, None
+    cols = list(df.columns)
+    for code_col in CODE_COL_CANDIDATES:
+        if code_col in cols:
+            for name_col in NAME_COL_CANDIDATES:
+                if name_col in cols:
+                    return code_col, name_col
+    for code_col in cols:
+        if "\u4ee3\u7801" in str(code_col):
+            for name_col in cols:
+                if ("\u540d\u79f0" in str(name_col)) or ("\u7b80\u79f0" in str(name_col)):
+                    return code_col, name_col
+    if len(cols) >= 2:
+        return cols[0], cols[1]
+    return None, None
+
+def _name_map_from_df(df):
+    if df is None or df.empty:
+        return {}
+    code_col, name_col = _resolve_code_name_columns(df)
+    if not code_col or not name_col:
+        return {}
+    try:
+        sub = df[[code_col, name_col]].copy()
+        sub[code_col] = sub[code_col].astype(str)
+        sub[name_col] = sub[name_col].astype(str)
+        return dict(zip(sub[code_col], sub[name_col]))
+    except Exception as e:
+        print(f"Build name map failed: {e}")
+        return {}
+
+def _extract_name_from_kv_df(df):
+    if df is None or df.empty:
+        return None
+    item_col = None
+    value_col = None
+    if "item" in df.columns and "value" in df.columns:
+        item_col, value_col = "item", "value"
+    elif "\u9879\u76ee" in df.columns and "\u503c" in df.columns:
+        item_col, value_col = "\u9879\u76ee", "\u503c"
+    if not item_col or not value_col:
+        return None
+    try:
+        mapping = dict(zip(df[item_col], df[value_col]))
+    except Exception:
+        return None
+    for key in NAME_ITEM_CANDIDATES:
+        if key in mapping and mapping[key]:
+            return str(mapping[key]).strip()
+    return None
+
+def _fetch_name_for_code(code):
+    code = str(code)
+    if hasattr(ak, "stock_individual_info_em"):
+        try:
+            df = ak.stock_individual_info_em(symbol=code)
+            name = _extract_name_from_kv_df(df)
+            if name:
+                return name
+        except Exception as e:
+            print(f"Fetch name for {code} failed: {e}")
+    return None
+
 def _should_refresh_names(state, now_ts):
     last_attempt = state.get("last_attempt_ts")
     if isinstance(last_attempt, (int, float)):
@@ -130,20 +217,76 @@ def _refresh_name_map_if_needed(force=False):
         return _load_name_map()
     state["last_attempt_ts"] = now_ts
     _save_name_refresh_state(state)
-    try:
-        spot_df = ak.stock_zh_a_spot_em()
-        if spot_df is None or spot_df.empty:
-            return _load_name_map()
-        spot_df["代码"] = spot_df["代码"].astype(str)
-        name_map = dict(zip(spot_df["代码"], spot_df["名称"]))
-        _save_name_map(name_map)
-        state["last_refresh_ts"] = now_ts
-        state["name_map_version"] = NAME_MAP_VERSION
-        _save_name_refresh_state(state)
+    def _try_source(label, fn):
+        try:
+            df = fn()
+        except Exception as e:
+            print(f"Name source {label} failed: {e}")
+            return {}
+        name_map = _name_map_from_df(df)
+        if not name_map:
+            return {}
+        state["last_source"] = label
         return name_map
-    except Exception as e:
-        print(f"Refresh names failed: {e}")
-        return _load_name_map()
+
+    sources = [("stock_zh_a_spot_em", lambda: ak.stock_zh_a_spot_em())]
+    if hasattr(ak, "stock_info_a_code_name"):
+        sources.append(("stock_info_a_code_name", lambda: ak.stock_info_a_code_name()))
+    if hasattr(ak, "stock_zh_a_spot"):
+        sources.append(("stock_zh_a_spot", lambda: ak.stock_zh_a_spot()))
+    sources.append(("index_stock_cons_000300", lambda: ak.index_stock_cons(symbol="000300")))
+
+    for label, fn in sources:
+        name_map = _try_source(label, fn)
+        if name_map:
+            _save_name_map(name_map)
+            state["last_refresh_ts"] = now_ts
+            state["name_map_version"] = NAME_MAP_VERSION
+            _save_name_refresh_state(state)
+            return name_map
+    return _load_name_map()
+
+def _refresh_name_map_for_codes(codes, force=False):
+    codes = [str(c) for c in codes if c is not None and str(c).strip()]
+    if not codes:
+        return _refresh_name_map_if_needed(force=force)
+
+    name_map = _refresh_name_map_if_needed(force=force)
+    if not name_map:
+        name_map = _load_name_map()
+
+    state = _load_name_refresh_state()
+    now_ts = int(time.time())
+    last_refresh = state.get("last_refresh_ts")
+    global_fresh = (
+        isinstance(last_refresh, (int, float))
+        and now_ts - last_refresh < NAME_REFRESH_TTL_HOURS * 3600
+        and bool(name_map)
+    )
+    if global_fresh and (not force):
+        return name_map
+
+    code_state = state.get("code_refresh_ts")
+    if not isinstance(code_state, dict):
+        code_state = {}
+
+    updated = False
+    for code in codes:
+        last_ts = code_state.get(code)
+        if (not force) and isinstance(last_ts, (int, float)):
+            if now_ts - last_ts < NAME_REFRESH_TTL_HOURS * 3600:
+                continue
+        name = _fetch_name_for_code(code)
+        if name:
+            name_map[code] = name
+            code_state[code] = now_ts
+            updated = True
+
+    if updated:
+        _save_name_map(name_map)
+        state["code_refresh_ts"] = code_state
+        _save_name_refresh_state(state)
+    return name_map
 
 def _refresh_cached_names(cached_df):
     if cached_df is None or cached_df.empty:
@@ -721,7 +864,8 @@ with st.sidebar:
 
         # 3. 手动刷新名称映射
         if st.button("🔄 手动更新股票名称"):
-            name_map = _refresh_name_map_if_needed(force=True)
+            codes_hint = st.session_state.get("last_top_codes", [])
+            name_map = _refresh_name_map_for_codes(codes_hint, force=True)
             if name_map:
                 st.toast(f"✅ 已更新名称映射：{len(name_map)} 条")
             else:
@@ -1045,7 +1189,19 @@ if not origin_df.empty:
         st.caption(f"注：这里的排名是基于 **{selected_date}** 当日的数据计算的。如果是多日模式，则展示这些股票在过去几天的走势。")
         st.caption("注：指数贡献 = 涨跌幅 × 权重(近似为成交额/市值占比)。此模式能看到是谁在拉动或砸盘。")
 
-        show_intraday = st.checkbox("加载分时走势 (本地优先，无则网络拉取)", value=False)
+        dates_sig = ("", "", 0)
+        if target_dates:
+            dates_sig = (
+                target_dates[0].strftime("%Y-%m-%d"),
+                target_dates[-1].strftime("%Y-%m-%d"),
+                len(target_dates),
+            )
+        intraday_sig = (playback_mode, chart_mode, int(top_n), dates_sig)
+        if st.session_state.get("intraday_sig") != intraday_sig:
+            st.session_state["intraday_sig"] = intraday_sig
+            st.session_state["show_intraday"] = False
+
+        show_intraday = st.checkbox("加载分时走势 (本地优先，无则网络拉取)", key="show_intraday")
         
         if show_intraday:
             # 使用 placeholder 放置进度条，避免组件销毁导致的索引错乱
@@ -1065,6 +1221,11 @@ if not origin_df.empty:
             sz_top = sz_pool.sort_values(sort_col, ascending=False).head(top_n)
             
             top_stocks_df = pd.concat([sh_top, sz_top], ignore_index=True)
+            top_codes = top_stocks_df['代码'].astype(str).tolist()
+            st.session_state["last_top_codes"] = top_codes
+            name_map = _refresh_name_map_for_codes(top_codes, force=False)
+            if name_map:
+                top_stocks_df['名称'] = top_stocks_df['代码'].astype(str).map(name_map).fillna(top_stocks_df['名称'])
 
             target_stocks_list = []
             for _, row in top_stocks_df.iterrows():
