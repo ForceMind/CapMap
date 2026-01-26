@@ -11,6 +11,7 @@ RUN_SCRIPT = os.path.join(APP_ROOT, "run.sh")
 STOP_SCRIPT = os.path.join(APP_ROOT, "stop.sh")
 PID_FILE = os.path.join(APP_ROOT, "streamlit.pid")
 LOG_FILE = os.path.join(APP_ROOT, "logs", "streamlit.out")
+APP_LOG_FILE = os.path.join(APP_ROOT, "logs", "app.log")
 
 HOST = os.environ.get("PANEL_HOST", "0.0.0.0")
 PORT = int(os.environ.get("PANEL_PORT", "9000"))
@@ -85,7 +86,8 @@ def _html_page(query):
         token_q = f"?token={query['token'][0]}"
     running_text = "运行中" if status["running"] else "未运行"
     pid_text = f"PID: {status['pid']}" if status["running"] else ""
-    log_text = _tail_log(LOG_FILE)
+    app_log_text = _tail_log(APP_LOG_FILE, max_lines=200, max_bytes=60000)
+    raw_log_text = _tail_log(LOG_FILE, max_lines=120, max_bytes=30000)
 
     return f"""<!doctype html>
 <html lang="zh">
@@ -99,7 +101,7 @@ def _html_page(query):
     .start {{ background: #2e7d32; color: #fff; }}
     .stop {{ background: #c62828; color: #fff; }}
     .restart {{ background: #1565c0; color: #fff; }}
-    pre {{ background: #111; color: #ddd; padding: 12px; border-radius: 8px; overflow: auto; }}
+    pre.log { background: #111; color: #ddd; padding: 12px; border-radius: 8px; max-height: 360px; overflow-y: auto; white-space: pre-wrap; }
     small {{ color: #666; }}
   </style>
 </head>
@@ -120,8 +122,12 @@ def _html_page(query):
       <button class="btn restart" type="submit">重启</button>
     </form>
   </p>
-  <h3>最近日志</h3>
-  <pre>{log_text}</pre>
+  <h3>应用日志 (app.log)</h3>
+  <pre class="log">{app_log_text}</pre>
+  <details>
+    <summary>查看原始日志 (streamlit.out)</summary>
+    <pre class="log">{raw_log_text}</pre>
+  </details>
 </body>
 </html>"""
 

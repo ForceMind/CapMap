@@ -14,6 +14,7 @@ import io
 import zipfile
 import shutil
 import json
+import logging
 
 # 尝试导入 Streamlit 上下文管理器，用于解决多线程 "missing ScriptRunContext" 警告
 try:
@@ -40,6 +41,36 @@ NAME_REFRESH_FILE = "data/name_refresh.json"
 NAME_REFRESH_TTL_HOURS = 24 * 180
 NAME_REFRESH_MIN_INTERVAL_MINUTES = 30
 NAME_MAP_VERSION = 1
+APP_LOG_FILE = "logs/app.log"
+
+def _init_logging():
+    log_path = os.path.abspath(APP_LOG_FILE)
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+    logger = logging.getLogger("capmap")
+    logger.setLevel(logging.INFO)
+    file_handler = None
+    for handler in logger.handlers:
+        if isinstance(handler, logging.FileHandler) and os.path.abspath(getattr(handler, "baseFilename", "")) == log_path:
+            file_handler = handler
+            break
+    if file_handler is None:
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    logger.propagate = False
+
+    logging.captureWarnings(True)
+    for name, level in (("akshare", logging.INFO), ("py.warnings", logging.WARNING)):
+        other = logging.getLogger(name)
+        other.setLevel(level)
+        if not any(isinstance(h, logging.FileHandler) and os.path.abspath(getattr(h, "baseFilename", "")) == log_path for h in other.handlers):
+            other.addHandler(file_handler)
+        other.propagate = False
+    return logger
+
+logger = _init_logging()
+
 CODE_COL_CANDIDATES = [
     "\u4ee3\u7801",
     "\u8bc1\u5238\u4ee3\u7801",
@@ -80,7 +111,7 @@ def _read_min_cache(path):
         try:
             return pd.read_csv(path, parse_dates=["time"])
         except Exception as e:
-            print(f"读取分时缓存失败: {e}")
+            logger.warning("读取分时缓存失败: %s", e)
     return None
 
 def _write_min_cache(path, df):
@@ -90,7 +121,7 @@ def _write_min_cache(path, df):
         df.to_csv(tmp_path, index=False)
         os.replace(tmp_path, path)
     except Exception as e:
-        print(f"保存分时缓存失败: {e}")
+        logger.warning("保存分时缓存失败: %s", e)
 
 def _load_name_refresh_state():
     if not os.path.exists(NAME_REFRESH_FILE):
@@ -101,7 +132,7 @@ def _load_name_refresh_state():
         if isinstance(data, dict):
             return data
     except Exception as e:
-        print(f"读取名称刷新记录失败: {e}")
+        logger.warning("读取名称刷新记录失败: %s", e)
     return {}
 
 def _save_name_refresh_state(state):
@@ -110,7 +141,7 @@ def _save_name_refresh_state(state):
         with open(NAME_REFRESH_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f)
     except Exception as e:
-        print(f"保存名称刷新记录失败: {e}")
+        logger.warning("保存名称刷新记录失败: %s", e)
 
 def _load_name_map():
     if not os.path.exists(NAME_MAP_FILE):
@@ -121,7 +152,7 @@ def _load_name_map():
         if isinstance(data, dict):
             return {str(k): v for k, v in data.items()}
     except Exception as e:
-        print(f"读取名称映射失败: {e}")
+        logger.warning("读取名称映射失败: %s", e)
     return {}
 
 def _save_name_map(name_map):
@@ -130,7 +161,7 @@ def _save_name_map(name_map):
         with open(NAME_MAP_FILE, "w", encoding="utf-8") as f:
             json.dump(name_map, f, ensure_ascii=False)
     except Exception as e:
-        print(f"保存名称映射失败: {e}")
+        logger.warning("保存名称映射失败: %s", e)
 
 def _resolve_code_name_columns(df):
     if df is None or df.empty:
@@ -162,7 +193,7 @@ def _name_map_from_df(df):
         sub[name_col] = sub[name_col].astype(str)
         return dict(zip(sub[code_col], sub[name_col]))
     except Exception as e:
-        print(f"Build name map failed: {e}")
+        logger.warning("名称映射构建失败: %s", e)
         return {}
 
 def _extract_name_from_kv_df(df):
@@ -194,7 +225,7 @@ def _fetch_name_for_code(code):
             if name:
                 return name
         except Exception as e:
-            print(f"Fetch name for {code} failed: {e}")
+            logger.warning("获取名称失败: code=%s err=%s", code, e)
     return None
 
 def _should_refresh_names(state, now_ts):
@@ -214,14 +245,16 @@ def _refresh_name_map_if_needed(force=False):
     if state.get("name_map_version") != NAME_MAP_VERSION:
         force = True
     if (not force) and (not _should_refresh_names(state, now_ts)):
+        logger.info("名称映射无需刷新，使用本地缓存")
         return _load_name_map()
     state["last_attempt_ts"] = now_ts
     _save_name_refresh_state(state)
+    logger.info("开始刷新名称映射 (force=%s)", force)
     def _try_source(label, fn):
         try:
             df = fn()
         except Exception as e:
-            print(f"Name source {label} failed: {e}")
+            logger.warning("名称源调用失败: %s err=%s", label, e)
             return {}
         name_map = _name_map_from_df(df)
         if not name_map:
@@ -240,14 +273,17 @@ def _refresh_name_map_if_needed(force=False):
         name_map = _try_source(label, fn)
         if name_map:
             _save_name_map(name_map)
+            logger.info("名称映射更新成功: source=%s count=%s", label, len(name_map))
             state["last_refresh_ts"] = now_ts
             state["name_map_version"] = NAME_MAP_VERSION
             _save_name_refresh_state(state)
             return name_map
+    logger.warning("名称映射刷新失败，使用本地缓存")
     return _load_name_map()
 
 def _refresh_name_map_for_codes(codes, force=False):
     codes = [str(c) for c in codes if c is not None and str(c).strip()]
+    logger.info("名称补齐开始: codes=%s force=%s", len(codes), force)
     if not codes:
         return _refresh_name_map_if_needed(force=force)
 
@@ -264,6 +300,7 @@ def _refresh_name_map_for_codes(codes, force=False):
         and bool(name_map)
     )
     if global_fresh and (not force):
+        logger.info("名称补齐完成: 无需更新")
         return name_map
 
     code_state = state.get("code_refresh_ts")
@@ -271,6 +308,7 @@ def _refresh_name_map_for_codes(codes, force=False):
         code_state = {}
 
     updated = False
+    updated_count = 0
     for code in codes:
         last_ts = code_state.get(code)
         if (not force) and isinstance(last_ts, (int, float)):
@@ -281,11 +319,15 @@ def _refresh_name_map_for_codes(codes, force=False):
             name_map[code] = name
             code_state[code] = now_ts
             updated = True
+            updated_count += 1
 
     if updated:
         _save_name_map(name_map)
         state["code_refresh_ts"] = code_state
         _save_name_refresh_state(state)
+        logger.info("名称补齐完成: 更新 %s 条", updated_count)
+    else:
+        logger.info("名称补齐完成: 无需更新")
     return name_map
 
 def _refresh_cached_names(cached_df):
@@ -360,8 +402,10 @@ def fetch_history_data():
        * 修正策略：由于 ak.stock_zh_a_hist 接口参数是 start_date 和 end_date，
          我们可以只下载 [缓存最新日期+1, 今天] 的数据，然后 append 到缓存中。
     """
+    logger.info("开始加载历史数据")
     cached_df = pd.DataFrame()
     last_cached_date = None
+    logger.info("已加载本地缓存，最新日期=%s", last_cached_date)
 
     # 1. 尝试加载本地缓存
     if os.path.exists(CACHE_FILE):
@@ -416,14 +460,17 @@ def fetch_history_data():
 
         # 获取成分股列表
         try:
+            logger.info("AKShare 获取成分股列表: 000300")
             cons_df = ak.index_stock_cons(symbol="000300")
         except:
              if not cached_df.empty:
+                 logger.warning("成分股列表获取失败，使用缓存")
                  st.warning("成分股列表获取失败，使用缓存数据")
                  return _refresh_cached_names(cached_df)
              return pd.DataFrame()
         
         if cons_df is None or cons_df.empty:
+            logger.warning("成分股列表为空，使用缓存")
              return _refresh_cached_names(cached_df) if not cached_df.empty else pd.DataFrame()
 
         if 'variety' in cons_df.columns:
@@ -454,6 +501,7 @@ def fetch_history_data():
         
         if end_date_str >= start_date_str:
              try:
+                 logger.info("AKShare 获取实时行情，用于补齐今日数据")
                  spot_df = ak.stock_zh_a_spot_em()
                  if spot_df is not None and not spot_df.empty:
                      # spot_df columns: 代码, 名称, 最新价, 涨跌幅, 成交额 ...
@@ -461,7 +509,7 @@ def fetch_history_data():
                      spot_df['代码'] = spot_df['代码'].astype(str)
                      today_spot_map = spot_df.set_index('代码').to_dict('index')
              except Exception as e:
-                 print(f"实时数据拉取失败: {e}")
+                 logger.warning("实时数据拉取失败: %s", e)
 
         # 循环获取历史
         # 使用 ThreadPoolExecutor 加速增量历史下载 (如果需要下载很多天)
@@ -525,6 +573,7 @@ def fetch_history_data():
                 add_script_run_ctx(threading.current_thread(), ctx)
             return fetch_one_stock(code, name)
 
+        logger.info("AKShare 拉取日线: 股票数=%s 区间=%s~%s", len(stock_list), start_date_str, end_date_str)
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
              future_map = {executor.submit(fetch_one_stock_wrapper, c, stock_names.get(c, c)): c for c in stock_list}
              
@@ -585,9 +634,11 @@ def fetch_history_data():
             except Exception as e:
                 st.warning(f"无法保存缓存: {e}")
 
+        logger.info("历史数据加载完成: 行数=%s", len(final_df))
         return final_df
 
     except Exception as e:
+        logger.exception("全局数据错误: %s", e)
         st.error(f"全局数据错误: {e}")
         status_text.empty()
         progress_bar.empty()
@@ -607,6 +658,8 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
     cached_df = _read_min_cache(cache_path)
     if cached_df is not None and not cached_df.empty:
         return cached_df
+    logger.info("AKShare 分时拉取: code=%s date=%s period=%s index=%s", symbol, date_str_norm, period, is_index)
+
 
     start_time = f"{date_str_norm} 09:30:00"
     end_time = f"{date_str_norm} 15:00:00"
@@ -633,7 +686,7 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
             if df is not None and not df.empty:
                 # 成功 - 重置退避
                 if fetch_cached_min_data.current_backoff > 0:
-                     print(f"[{datetime.now().time()}] API 恢复。重置退避时间。")
+                     logger.info("API 恢复，重置退避时间")
                      fetch_cached_min_data.current_backoff = 0
 
                 # 统一列名
@@ -683,7 +736,7 @@ def background_prefetch_task(date_list, origin_df):
     后台线程：执行数据预取。
     """
     total_dates = len(date_list)
-    print(f"\n[后台任务] 开始预取 {total_dates} 天的数据。")
+    logger.info("后台任务开始预取 %s 天数据", total_dates)
     
     current_backoff = 0 # 秒
     
@@ -691,7 +744,7 @@ def background_prefetch_task(date_list, origin_df):
     
     for i, d in enumerate(date_list):
         d_str = d.strftime("%Y-%m-%d")
-        print(f"[后台任务] 正在处理: {d_str} ({i+1}/{total_dates})")
+        logger.info("后台任务处理中: %s (%s/%s)", d_str, i + 1, total_dates)
         
         # 筛选
         daily = origin_df[origin_df['日期'].dt.date == d]
@@ -716,7 +769,7 @@ def background_prefetch_task(date_list, origin_df):
                 try:
                     # 检查退避
                     if current_backoff > 0:
-                        print(f"[后台任务] 处于冷却状态。等待 {current_backoff} 秒...")
+                        logger.info("后台任务冷却中，等待 %s 秒", current_backoff)
                         time.sleep(current_backoff)
                         
                     # 尝试拉取 (fetch_cached_min_data 内部有缓存，如果已存在会直接返回)
@@ -731,7 +784,7 @@ def background_prefetch_task(date_list, origin_df):
                     
                     # Success
                     if current_backoff > 0:
-                        print(f"[后台任务] 已恢复。重置退避时间。")
+                        logger.info("后台任务已恢复，重置退避时间")
                         current_backoff = 0
                     
                     # 拉取成功后稍微 sleep 一下避免过于频繁 (0.1s)
@@ -739,17 +792,17 @@ def background_prefetch_task(date_list, origin_df):
                     break # 跳出 while，处理下一个 task
 
                 except Exception as e:
-                    print(f"[后台任务] 获取 {t_code} ({t_date}) 失败: {e}")
+                    logger.warning("后台任务获取失败: code=%s date=%s err=%s", t_code, t_date, e)
                     # 触发退避机制
                     if current_backoff == 0:
                         current_backoff = 60
                     else:
                         current_backoff *= 2
                     
-                    print(f"[后台任务] 退避时间增加到 {current_backoff}秒。正在重试同一任务...")
+                    logger.warning("后台任务退避时间增加到 %s 秒，重试同一任务", current_backoff)
                     # Loop continues, will sleep at start of next iteration
     
-    print("[后台任务] 所有任务已完成。")
+    logger.info("后台任务已完成")
 
 
 def fetch_intraday_data_v2(stock_codes, target_date_str, period='1'):
@@ -1247,6 +1300,7 @@ if not origin_df.empty:
             
             target_dates_to_fetch = target_dates
             total_steps = len(target_dates_to_fetch)
+            logger.info("分时加载开始: 模式=%s 日期数=%s 标的数=%s 周期=%s", chart_mode, len(target_dates_to_fetch), len(target_stocks_list), period_to_use)
 
             # 改回扁平化结构，不再使用 container，减少 DOM 操作层级
             # 并发线程中缓存的 show_spinner=False 已经设置，这里应该安全了
@@ -1266,6 +1320,7 @@ if not origin_df.empty:
                 
                 all_intraday_data.extend(day_results)
             
+            logger.info("分时加载完成: 结果数=%s", len(all_intraday_data))
             # 数据拉取完毕后，清除进度组件
             status_text.empty()
             fetch_progress.empty()
