@@ -13,6 +13,7 @@ import sys
 import io
 import zipfile
 import shutil
+import json
 
 # 尝试导入 Streamlit 上下文管理器，用于解决多线程 "missing ScriptRunContext" 警告
 try:
@@ -34,6 +35,11 @@ st.set_page_config(
 
 CACHE_FILE = "data/csi300_history_cache.parquet"
 MIN_CACHE_DIR = "data/min_cache"
+NAME_MAP_FILE = "data/name_map.json"
+NAME_REFRESH_FILE = "data/name_refresh.json"
+NAME_REFRESH_TTL_HOURS = 24 * 180
+NAME_REFRESH_MIN_INTERVAL_MINUTES = 30
+NAME_MAP_VERSION = 1
 
 def _normalize_date_str(date_str):
     try:
@@ -63,6 +69,96 @@ def _write_min_cache(path, df):
         os.replace(tmp_path, path)
     except Exception as e:
         print(f"保存分时缓存失败: {e}")
+
+def _load_name_refresh_state():
+    if not os.path.exists(NAME_REFRESH_FILE):
+        return {}
+    try:
+        with open(NAME_REFRESH_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception as e:
+        print(f"读取名称刷新记录失败: {e}")
+    return {}
+
+def _save_name_refresh_state(state):
+    try:
+        os.makedirs(os.path.dirname(NAME_REFRESH_FILE), exist_ok=True)
+        with open(NAME_REFRESH_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception as e:
+        print(f"保存名称刷新记录失败: {e}")
+
+def _load_name_map():
+    if not os.path.exists(NAME_MAP_FILE):
+        return {}
+    try:
+        with open(NAME_MAP_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {str(k): v for k, v in data.items()}
+    except Exception as e:
+        print(f"读取名称映射失败: {e}")
+    return {}
+
+def _save_name_map(name_map):
+    try:
+        os.makedirs(os.path.dirname(NAME_MAP_FILE), exist_ok=True)
+        with open(NAME_MAP_FILE, "w", encoding="utf-8") as f:
+            json.dump(name_map, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"保存名称映射失败: {e}")
+
+def _should_refresh_names(state, now_ts):
+    last_attempt = state.get("last_attempt_ts")
+    if isinstance(last_attempt, (int, float)):
+        if now_ts - last_attempt < NAME_REFRESH_MIN_INTERVAL_MINUTES * 60:
+            return False
+    last_refresh = state.get("last_refresh_ts")
+    if isinstance(last_refresh, (int, float)):
+        if now_ts - last_refresh < NAME_REFRESH_TTL_HOURS * 3600:
+            return False
+    return True
+
+def _refresh_name_map_if_needed(force=False):
+    now_ts = int(time.time())
+    state = _load_name_refresh_state()
+    if state.get("name_map_version") != NAME_MAP_VERSION:
+        force = True
+    if (not force) and (not _should_refresh_names(state, now_ts)):
+        return _load_name_map()
+    state["last_attempt_ts"] = now_ts
+    _save_name_refresh_state(state)
+    try:
+        spot_df = ak.stock_zh_a_spot_em()
+        if spot_df is None or spot_df.empty:
+            return _load_name_map()
+        spot_df["代码"] = spot_df["代码"].astype(str)
+        name_map = dict(zip(spot_df["代码"], spot_df["名称"]))
+        _save_name_map(name_map)
+        state["last_refresh_ts"] = now_ts
+        state["name_map_version"] = NAME_MAP_VERSION
+        _save_name_refresh_state(state)
+        return name_map
+    except Exception as e:
+        print(f"Refresh names failed: {e}")
+        return _load_name_map()
+
+def _refresh_cached_names(cached_df):
+    if cached_df is None or cached_df.empty:
+        return cached_df
+    if '代码' not in cached_df.columns:
+        return cached_df
+    name_map = _refresh_name_map_if_needed()
+    if not name_map:
+        return cached_df
+    cached_df['代码'] = cached_df['代码'].astype(str)
+    if '名称' in cached_df.columns:
+        cached_df['名称'] = cached_df['代码'].map(name_map).fillna(cached_df['名称'])
+    else:
+        cached_df['名称'] = cached_df['代码'].map(name_map)
+    return cached_df
 
 def build_data_backup_zip():
     data_dir = "data"
@@ -151,7 +247,7 @@ def fetch_history_data():
              # 这导致如果早上9点跑了一次（有数据），下午3点再跑，还是旧的。
              # 改进：如果是今天，且现在还没收盘，或者刚收盘，允许覆盖？
              # 暂保留原逻辑防止频繁请求，依靠 "强制刷新" 按钮来清空缓存。
-             return cached_df
+             return _refresh_cached_names(cached_df)
         
         start_date_str = (last_cached_date + timedelta(days=1)).strftime("%Y%m%d")
     else:
@@ -161,7 +257,7 @@ def fetch_history_data():
 
     # 如果不需要更新
     if start_date_str > end_date_str:
-        return cached_df
+        return _refresh_cached_names(cached_df)
 
     # 状态容器
     status_text = st.empty()
@@ -181,11 +277,11 @@ def fetch_history_data():
         except:
              if not cached_df.empty:
                  st.warning("成分股列表获取失败，使用缓存数据")
-                 return cached_df
+                 return _refresh_cached_names(cached_df)
              return pd.DataFrame()
         
         if cons_df is None or cons_df.empty:
-             return cached_df if not cached_df.empty else pd.DataFrame()
+             return _refresh_cached_names(cached_df) if not cached_df.empty else pd.DataFrame()
 
         if 'variety' in cons_df.columns:
             code_col, name_col = 'variety', 'name'
@@ -198,16 +294,10 @@ def fetch_history_data():
         stock_list = cons_df[code_col].tolist()
         stock_names = dict(zip(cons_df[code_col], cons_df[name_col]))
         
-        # --- 尝试获取今日实时数据 (Spot) 修改股票名称 ---
-        try:
-             spot_df = ak.stock_zh_a_spot_em()
-             if spot_df is not None and not spot_df.empty:
-                 # 更新名称映射
-                 spot_df['代码'] = spot_df['代码'].astype(str)
-                 new_names = dict(zip(spot_df['代码'], spot_df['名称']))
-                 stock_names.update(new_names)
-        except Exception as e:
-             print(f"Update stock names failed: {e}")
+        # Update name map (refresh cadence)
+        name_map = _refresh_name_map_if_needed()
+        if name_map:
+            stock_names.update(name_map)
 
         new_data_list = []
         total_stocks = len(stock_list)
@@ -629,13 +719,21 @@ with st.sidebar:
             st.cache_data.clear()
             st.toast("✅ 内存缓存已清空，磁盘缓存保留。")
 
-        # 3. 删除本地分时缓存
+        # 3. 手动刷新名称映射
+        if st.button("🔄 手动更新股票名称"):
+            name_map = _refresh_name_map_if_needed(force=True)
+            if name_map:
+                st.toast(f"✅ 已更新名称映射：{len(name_map)} 条")
+            else:
+                st.warning("未获取到最新名称映射。")
+
+        # 4. 删除本地分时缓存
         if st.button("🗑️ 删除本地分时缓存"):
             clear_min_cache()
             st.cache_data.clear()
             st.toast("✅ 本地分时缓存已删除。")
 
-        # 4. 彻底重置
+        # 5. 彻底重置
         if st.button("🚨 彻底重置 (删除所有)"):
             if os.path.exists(CACHE_FILE):
                 os.remove(CACHE_FILE)
