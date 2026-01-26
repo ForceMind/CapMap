@@ -463,15 +463,15 @@ def fetch_history_data():
             logger.info("AKShare 获取成分股列表: 000300")
             cons_df = ak.index_stock_cons(symbol="000300")
         except:
-             if not cached_df.empty:
-                 logger.warning("成分股列表获取失败，使用缓存")
-                 st.warning("成分股列表获取失败，使用缓存数据")
-                 return _refresh_cached_names(cached_df)
-             return pd.DataFrame()
+            if not cached_df.empty:
+                logger.warning("成分股列表获取失败，使用缓存")
+                st.warning("成分股列表获取失败，使用缓存数据")
+                return _refresh_cached_names(cached_df)
+            return pd.DataFrame()
         
         if cons_df is None or cons_df.empty:
             logger.warning("成分股列表为空，使用缓存")
-             return _refresh_cached_names(cached_df) if not cached_df.empty else pd.DataFrame()
+            return _refresh_cached_names(cached_df) if not cached_df.empty else pd.DataFrame()
 
         if 'variety' in cons_df.columns:
             code_col, name_col = 'variety', 'name'
