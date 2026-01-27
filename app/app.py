@@ -43,6 +43,8 @@ NAME_REFRESH_TTL_HOURS = 24 * 180
 NAME_REFRESH_MIN_INTERVAL_MINUTES = 30
 NAME_MAP_VERSION = 1
 APP_LOG_FILE = "logs/app.log"
+INTRADAY_WORKERS = int(os.environ.get("INTRADAY_WORKERS", "1"))
+INTRADAY_DELAY_SEC = float(os.environ.get("INTRADAY_DELAY_SEC", "0.5"))
 
 def _init_logging():
     log_path = os.path.abspath(APP_LOG_FILE)
@@ -929,17 +931,10 @@ def fetch_intraday_data_v2(stock_codes, target_date_str, period='1'):
 
     # 并发执行
     # 线程数不宜过多，以免触发反爬限制，10-20左右较为安全
-    ctx = get_script_run_ctx()
-    def _worker_wrapper(t):
-        if ctx:
-            add_script_run_ctx(threading.current_thread(), ctx)
-        return _worker(t)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
-        future_to_task = {executor.submit(_worker_wrapper, t): t for t in tasks}
-        
-        for future in concurrent.futures.as_completed(future_to_task):
-            item, err, source = future.result()
+    if INTRADAY_WORKERS <= 1:
+        logger.info("\u5206\u65f6\u62c9\u53d6\u6a21\u5f0f: \u4e32\u884c delay=%.2fs", INTRADAY_DELAY_SEC)
+        for t in tasks:
+            item, err, source = _worker(t)
             if item:
                 results.append(item)
                 stats['success'] += 1
@@ -948,7 +943,31 @@ def fetch_intraday_data_v2(stock_codes, target_date_str, period='1'):
                 stats['failed'] += 1
             if source in stats:
                 stats[source] += 1
+            if source == 'network' and INTRADAY_DELAY_SEC > 0:
+                time.sleep(INTRADAY_DELAY_SEC)
+    else:
+        logger.info("\u5206\u65f6\u62c9\u53d6\u6a21\u5f0f: \u5e76\u53d1 workers=%s", INTRADAY_WORKERS)
+        # ????????????????
+        ctx = get_script_run_ctx()
+        def _worker_wrapper(t):
+            if ctx:
+                add_script_run_ctx(threading.current_thread(), ctx)
+            return _worker(t)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=INTRADAY_WORKERS) as executor:
+            future_to_task = {executor.submit(_worker_wrapper, t): t for t in tasks}
             
+            for future in concurrent.futures.as_completed(future_to_task):
+                item, err, source = future.result()
+                if item:
+                    results.append(item)
+                    stats['success'] += 1
+                if err:
+                    failures.append(err)
+                    stats['failed'] += 1
+                if source in stats:
+                    stats[source] += 1
+
     return results, failures, stats
 
 # 2. UI 布局
