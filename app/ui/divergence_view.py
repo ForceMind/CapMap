@@ -1,4 +1,5 @@
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 
@@ -130,5 +131,3 @@ def render_divergence_view(df, available_dates):
             hide_index=True
         )
 
-else:
-st.error("数据加载失败，请刷新重试。")

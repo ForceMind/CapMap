@@ -5,6 +5,7 @@ echo "========================================="
 echo "   CapMap 一键更新脚本"
 echo "   (不会删除 data/ 与 .streamlit/ 配置)"
 echo "========================================="
+echo "提示：直接回车将保留当前配置"
 
 APP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$APP_ROOT"
@@ -38,6 +39,37 @@ pick_python() {
     fi
   done
   return 1
+}
+
+load_existing_licence() {
+  if [[ -n "${BIYING_LICENCE:-}" ]]; then
+    return 0
+  fi
+  local py
+  py="$(pick_python || true)"
+  if [[ -z "$py" ]]; then
+    return 0
+  fi
+  local cfg_path="$APP_ROOT/data/provider_config.json"
+  if [[ ! -f "$cfg_path" ]]; then
+    return 0
+  fi
+  BIYING_LICENCE="$("$py" - <<'PY'
+import json
+import os
+path = os.environ.get('CFG_PATH')
+if not path or not os.path.exists(path):
+    print('', end='')
+    raise SystemExit(0)
+try:
+    with open(path, 'r', encoding='utf-8') as f:
+        data = json.load(f) if f else {}
+except Exception:
+    data = {}
+value = data.get('biying_licence') or data.get('licence') or data.get('license') or ''
+print(value, end='')
+PY
+CFG_PATH="$cfg_path")"
 }
 
 write_provider_config() {
@@ -105,7 +137,8 @@ if ! git pull --ff-only "$REMOTE" "$BRANCH"; then
 fi
 
 if [[ -t 0 ]]; then
-  read -r -p "可选：请输入必盈 licence（留空跳过）: " INPUT_LICENCE
+  load_existing_licence
+  read -r -p "可选：请输入必盈 licence（回车保留当前，留空跳过）: " INPUT_LICENCE
   if [[ -n "${INPUT_LICENCE:-}" ]]; then
     BIYING_LICENCE="$INPUT_LICENCE"
     write_provider_config

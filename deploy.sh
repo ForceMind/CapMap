@@ -5,78 +5,139 @@ set -euo pipefail
 echo "========================================="
 echo "   CapMap 一键部署脚本"
 echo "========================================="
+echo "提示：直接回车将保留当前配置"
+
 
 APP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$APP_ROOT/app"
 VENV_DIR="$APP_ROOT/.venv"
 LOG_DIR="$APP_ROOT/logs"
+ENV_PORT="${PORT:-}"
+ENV_BASE_PATH="${BASE_PATH:-}"
+ENV_HOST="${HOST:-}"
+ENV_PIP_INDEX_URL="${PIP_INDEX_URL:-}"
+ENV_PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:-}"
+ENV_BIYING_LICENCE="${BIYING_LICENCE:-}"
+ENV_NGINX_SETUP="${NGINX_SETUP:-}"
+ENV_NGINX_PORT="${NGINX_PORT:-}"
+ENV_NGINX_SERVER_NAME="${NGINX_SERVER_NAME:-}"
+ENV_NGINX_CONF="${NGINX_CONF:-}"
+ENV_PANEL_ENABLE="${PANEL_ENABLE:-}"
+ENV_PANEL_HOST="${PANEL_HOST:-}"
+ENV_PANEL_PORT="${PANEL_PORT:-}"
+ENV_PANEL_TOKEN="${PANEL_TOKEN:-}"
 
-PORT="${PORT:-8501}"
-BASE_PATH="${BASE_PATH:-capmap}"
-HOST="${HOST:-0.0.0.0}"
-PIP_INDEX_URL="${PIP_INDEX_URL:-}"
-PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:-}"
-BIYING_LICENCE="${BIYING_LICENCE:-}"
+PORT="8501"
+BASE_PATH="capmap"
+HOST="0.0.0.0"
+PIP_INDEX_URL=""
+PIP_EXTRA_INDEX_URL=""
+BIYING_LICENCE=""
 
-NGINX_SETUP="${NGINX_SETUP:-yes}"
-NGINX_PORT="${NGINX_PORT:-80}"
-NGINX_SERVER_NAME="${NGINX_SERVER_NAME:-_}"
-NGINX_CONF="${NGINX_CONF:-/etc/nginx/conf.d/capmap.conf}"
-PANEL_ENABLE="${PANEL_ENABLE:-no}"
-PANEL_HOST="${PANEL_HOST:-0.0.0.0}"
-PANEL_PORT="${PANEL_PORT:-9000}"
-PANEL_TOKEN="${PANEL_TOKEN:-}"
+NGINX_SETUP="yes"
+NGINX_PORT="80"
+NGINX_SERVER_NAME="_"
+NGINX_CONF="/etc/nginx/conf.d/capmap.conf"
+PANEL_ENABLE="no"
+PANEL_HOST="0.0.0.0"
+PANEL_PORT="9000"
+PANEL_TOKEN=""
 PANEL_PID_FILE="$APP_ROOT/panel.pid"
 PANEL_LOG="$LOG_DIR/panel.out"
 PANEL_APP="$APP_ROOT/control_panel/panel.py"
 
+CONFIG_FILE="$APP_ROOT/.capmap_deploy.conf"
+
+load_deploy_config() {
+  if [[ -f "$CONFIG_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+  fi
+}
+
+save_deploy_config() {
+  {
+    echo "PORT=$(printf %q "$PORT")"
+    echo "BASE_PATH=$(printf %q "$BASE_PATH")"
+    echo "HOST=$(printf %q "$HOST")"
+    echo "PIP_INDEX_URL=$(printf %q "$PIP_INDEX_URL")"
+    echo "PIP_EXTRA_INDEX_URL=$(printf %q "$PIP_EXTRA_INDEX_URL")"
+    echo "BIYING_LICENCE=$(printf %q "$BIYING_LICENCE")"
+    echo "NGINX_SETUP=$(printf %q "$NGINX_SETUP")"
+    echo "NGINX_PORT=$(printf %q "$NGINX_PORT")"
+    echo "NGINX_SERVER_NAME=$(printf %q "$NGINX_SERVER_NAME")"
+    echo "NGINX_CONF=$(printf %q "$NGINX_CONF")"
+    echo "PANEL_ENABLE=$(printf %q "$PANEL_ENABLE")"
+    echo "PANEL_HOST=$(printf %q "$PANEL_HOST")"
+    echo "PANEL_PORT=$(printf %q "$PANEL_PORT")"
+    echo "PANEL_TOKEN=$(printf %q "$PANEL_TOKEN")"
+  } > "$CONFIG_FILE"
+}
+
+load_deploy_config
+
+if [[ -n "$ENV_PORT" ]]; then PORT="$ENV_PORT"; fi
+if [[ -n "$ENV_BASE_PATH" ]]; then BASE_PATH="$ENV_BASE_PATH"; fi
+if [[ -n "$ENV_HOST" ]]; then HOST="$ENV_HOST"; fi
+if [[ -n "$ENV_PIP_INDEX_URL" ]]; then PIP_INDEX_URL="$ENV_PIP_INDEX_URL"; fi
+if [[ -n "$ENV_PIP_EXTRA_INDEX_URL" ]]; then PIP_EXTRA_INDEX_URL="$ENV_PIP_EXTRA_INDEX_URL"; fi
+if [[ -n "$ENV_BIYING_LICENCE" ]]; then BIYING_LICENCE="$ENV_BIYING_LICENCE"; fi
+if [[ -n "$ENV_NGINX_SETUP" ]]; then NGINX_SETUP="$ENV_NGINX_SETUP"; fi
+if [[ -n "$ENV_NGINX_PORT" ]]; then NGINX_PORT="$ENV_NGINX_PORT"; fi
+if [[ -n "$ENV_NGINX_SERVER_NAME" ]]; then NGINX_SERVER_NAME="$ENV_NGINX_SERVER_NAME"; fi
+if [[ -n "$ENV_NGINX_CONF" ]]; then NGINX_CONF="$ENV_NGINX_CONF"; fi
+if [[ -n "$ENV_PANEL_ENABLE" ]]; then PANEL_ENABLE="$ENV_PANEL_ENABLE"; fi
+if [[ -n "$ENV_PANEL_HOST" ]]; then PANEL_HOST="$ENV_PANEL_HOST"; fi
+if [[ -n "$ENV_PANEL_PORT" ]]; then PANEL_PORT="$ENV_PANEL_PORT"; fi
+if [[ -n "$ENV_PANEL_TOKEN" ]]; then PANEL_TOKEN="$ENV_PANEL_TOKEN"; fi
+
 if [[ -t 0 ]]; then
-  read -r -p "请输入端口（默认 $PORT）: " INPUT_PORT
+  read -r -p "请输入端口（默认 $PORT，回车保留当前）: " INPUT_PORT
   if [[ -n "${INPUT_PORT:-}" ]]; then
     PORT="$INPUT_PORT"
   fi
 
-  read -r -p "请输入二级地址（默认 $BASE_PATH，不要带 /）: " INPUT_PATH
+  read -r -p "请输入二级地址（默认 $BASE_PATH，不要带 /，回车保留当前）: " INPUT_PATH
   if [[ -n "${INPUT_PATH:-}" ]]; then
     BASE_PATH="$INPUT_PATH"
   fi
 
-  read -r -p "可选：请输入 pip 源（留空使用默认，如 https://pypi.org/simple）: " INPUT_PIP
+  read -r -p "可选：请输入 pip 源（回车保留当前，留空使用默认，如 https://pypi.org/simple）: " INPUT_PIP
   if [[ -n "${INPUT_PIP:-}" ]]; then
     PIP_INDEX_URL="$INPUT_PIP"
   fi
 
-  read -r -p "可选：请输入必盈 licence（留空跳过）: " INPUT_LICENCE
+  read -r -p "可选：请输入必盈 licence（回车保留当前，留空跳过）: " INPUT_LICENCE
   if [[ -n "${INPUT_LICENCE:-}" ]]; then
     BIYING_LICENCE="$INPUT_LICENCE"
   fi
 
-  read -r -p "是否配置 Nginx 反代（默认 Y）: " INPUT_NGX
+  read -r -p "是否配置 Nginx 反代（默认 Y，回车保留当前）: " INPUT_NGX
   if [[ -n "${INPUT_NGX:-}" ]]; then
     NGINX_SETUP="$INPUT_NGX"
   fi
 
-  read -r -p "Nginx 监听端口（默认 $NGINX_PORT）: " INPUT_NGX_PORT
+  read -r -p "Nginx 监听端口（默认 $NGINX_PORT，回车保留当前）: " INPUT_NGX_PORT
   if [[ -n "${INPUT_NGX_PORT:-}" ]]; then
     NGINX_PORT="$INPUT_NGX_PORT"
   fi
 
-  read -r -p "Nginx server_name（默认 _，可填域名或 IP）: " INPUT_NGX_NAME
+  read -r -p "Nginx server_name（默认 _，可填域名或 IP，回车保留当前）: " INPUT_NGX_NAME
   if [[ -n "${INPUT_NGX_NAME:-}" ]]; then
     NGINX_SERVER_NAME="$INPUT_NGX_NAME"
   fi
 
-  read -r -p "是否启动控制台（默认 N）: " INPUT_PANEL
+  read -r -p "是否启动控制台（默认 N，回车保留当前）: " INPUT_PANEL
   if [[ -n "${INPUT_PANEL:-}" ]]; then
     PANEL_ENABLE="$INPUT_PANEL"
   fi
 
   if [[ "${PANEL_ENABLE,,}" == "y" || "${PANEL_ENABLE,,}" == "yes" ]]; then
-    read -r -p "控制台端口（默认 $PANEL_PORT）: " INPUT_PANEL_PORT
+    read -r -p "控制台端口（默认 $PANEL_PORT，回车保留当前）: " INPUT_PANEL_PORT
     if [[ -n "${INPUT_PANEL_PORT:-}" ]]; then
       PANEL_PORT="$INPUT_PANEL_PORT"
     fi
-    read -r -p "控制台访问口令(必填): " INPUT_PANEL_TOKEN
+    read -r -p "控制台访问口令(必填，回车保留当前): " INPUT_PANEL_TOKEN
     if [[ -n "${INPUT_PANEL_TOKEN:-}" ]]; then
       PANEL_TOKEN="$INPUT_PANEL_TOKEN"
     fi
@@ -85,6 +146,7 @@ fi
 
 # Streamlit 的 baseUrlPath 不能包含前导 /
 BASE_PATH="${BASE_PATH#/}"
+save_deploy_config
 
 echo "开始部署：端口=$PORT，二级地址=/$BASE_PATH/"
 
