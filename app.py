@@ -66,7 +66,7 @@ with st.sidebar:
             st.cache_data.clear()
             st.rerun()
 
-        if st.checkbox("显示高级选项 (全局重置)"):
+        if st.checkbox("显示高级选项 (全局重置)", key="show_advanced_reset"):
             if st.button("💣 毁灭吧赶紧的 (删除所有池数据)"):
                 for p_name, p_val in STOCK_POOLS.items():
                     if os.path.exists(p_val["cache"]):
@@ -77,7 +77,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🛠️ 板块过滤")
     filter_cyb = st.checkbox("屏蔽创业板 (300开头)", value=False)
-    filter_kcb = st.checkbox("????? (688??)", value=True)
+    filter_kcb = st.checkbox("屏蔽科创板 (688开头)", value=True)
 
     st.markdown("---")
     nav_option = st.radio(
@@ -88,16 +88,25 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("⏯️ 拉取控制")
-    auto_fetch = st.checkbox("自动拉取历史数据", value=True)
-    max_workers = st.slider("并发线程数", min_value=1, max_value=20, value=10)
-    request_delay = st.slider("请求间隔(秒)", min_value=0.0, max_value=1.0, value=0.0, step=0.05)
+    auto_fetch = st.checkbox("自动拉取历史数据", value=False)
+    max_workers = st.slider("并发线程数", min_value=1, max_value=20, value=3)
+    request_delay = st.slider("请求间隔(秒)", min_value=0.0, max_value=1.0, value=0.5, step=0.05)
     fetch_spot = st.checkbox("盘中补全(Spot)", value=True)
-    manual_fetch = False
+    if "stop_fetch_requested" not in st.session_state:
+        st.session_state.stop_fetch_requested = False
+    if st.button("中断拉取"):
+        st.session_state.stop_fetch_requested = True
+    if st.session_state.get("stop_fetch_requested"):
+        st.info("已请求中断，本次拉取将尽快停止。")
+    if "manual_fetch_requested" not in st.session_state:
+        st.session_state.manual_fetch_requested = False
     if not auto_fetch:
-        manual_fetch = st.button("开始拉取/刷新")
+        if st.button("开始拉取/刷新"):
+            st.session_state.stop_fetch_requested = False
+            st.session_state.manual_fetch_requested = True
 
-allow_download = auto_fetch or manual_fetch
 confirm_key = f"fetch_confirmed_{selected_pool}"
+allow_download = auto_fetch or st.session_state.get("manual_fetch_requested", False) or st.session_state.get(confirm_key, False)
 
 if allow_download:
     plan = build_fetch_plan(selected_pool, max_workers, request_delay, fetch_spot)
@@ -115,14 +124,17 @@ if allow_download:
                 "接口说明:",
                 "- index_stock_cons: 指数成分股列表",
                 "- stock_zh_a_hist: 个股日K历史（主请求，易限频）",
-                f"- stock_zh_a_spot_em: ???????{('?????' if plan['fetch_spot'] else '?????')}",
+                f"- stock_zh_a_spot_em: 全市场盘中补全{('（已启用）' if plan['fetch_spot'] else '（未启用）')}",
                 "- 分时接口(如勾选分时图): stock_zh_a_hist_min_em / index_zh_a_hist_min_em",
                 f"股票数量: {plan['total_stocks'] if plan['total_stocks'] is not None else '未知'}",
                 f"线程数: {plan['max_workers']} | 请求间隔: {plan['request_delay']} 秒",
                 f"预计耗时: {est_text}"
             ]
             st.warning("即将拉取数据，请确认是否继续：\n\n" + "\n".join([f"- {line}" for line in plan_lines]))
+            if not plan["has_cache"]:
+                st.info("暂无本地缓存，继续拉取将开始初始化下载。")
             if st.button("继续拉取"):
+                st.session_state.stop_fetch_requested = False
                 st.session_state[confirm_key] = True
                 st.rerun()
             st.stop()
@@ -138,8 +150,13 @@ with st.spinner(f"正在初始化 [{selected_pool}] 历史数据仓库..."):
         fetch_spot=fetch_spot
     )
 
-if confirm_key in st.session_state:
-    st.session_state[confirm_key] = False
+if allow_download:
+    if "manual_fetch_requested" in st.session_state:
+        st.session_state.manual_fetch_requested = False
+    if "stop_fetch_requested" in st.session_state:
+        st.session_state.stop_fetch_requested = False
+    if confirm_key in st.session_state:
+        st.session_state[confirm_key] = False
 
 # --- 后台任务检测与控制 ---
 bg_thread = None
@@ -175,7 +192,13 @@ with st.sidebar:
                     st.error("历史数据尚未就绪")
 
 if origin_df.empty:
-    st.error("数据加载失败，请刷新重试。")
+    if not allow_download:
+        st.info("暂无缓存，是否现在拉取？")
+        if st.button("现在拉取"):
+            st.session_state.manual_fetch_requested = True
+            st.rerun()
+    else:
+        st.error("数据加载失败，请刷新重试。")
     st.stop()
 
 # 全局过滤
@@ -199,14 +222,32 @@ if nav_option == "📊 盘面回放":
     )
 
     available_dates = sorted(filtered_df['日期'].dt.date.unique())
+    today = datetime.now().date()
+    last_available_date = available_dates[-1]
 
-    if 'selected_date_idx' not in st.session_state:
-        st.session_state.selected_date_idx = len(available_dates) - 1
+    date_idx_key = f"selected_date_idx_{selected_pool}"
+    date_override_key = f"selected_date_override_{selected_pool}"
+    date_init_key = f"date_initialized_{selected_pool}"
 
-    if st.session_state.selected_date_idx >= len(available_dates):
-        st.session_state.selected_date_idx = len(available_dates) - 1
-    if st.session_state.selected_date_idx < 0:
-        st.session_state.selected_date_idx = 0
+    if date_idx_key not in st.session_state:
+        st.session_state[date_idx_key] = len(available_dates) - 1
+    if date_override_key not in st.session_state:
+        st.session_state[date_override_key] = None
+    if date_init_key not in st.session_state:
+        if today in available_dates:
+            st.session_state[date_idx_key] = available_dates.index(today)
+        else:
+            st.session_state[date_override_key] = today
+        st.session_state[date_init_key] = True
+
+    if st.session_state[date_override_key] in available_dates:
+        st.session_state[date_idx_key] = available_dates.index(st.session_state[date_override_key])
+        st.session_state[date_override_key] = None
+
+    if st.session_state[date_idx_key] >= len(available_dates):
+        st.session_state[date_idx_key] = len(available_dates) - 1
+    if st.session_state[date_idx_key] < 0:
+        st.session_state[date_idx_key] = 0
 
     st.markdown("### 📅 选择回放日期")
 
@@ -217,63 +258,78 @@ if nav_option == "📊 盘面回放":
     if playback_mode == "单日复盘":
         col_prev, col_slider, col_next = st.columns([1, 6, 1])
 
+        current_date_val = st.session_state[date_override_key] or available_dates[st.session_state[date_idx_key]]
+
         with col_prev:
             st.write("")
             st.write("")
-            if st.button("⬅️ 前一天"):
-                if st.session_state.selected_date_idx > 0:
-                    st.session_state.selected_date_idx -= 1
+            if st.button("前一天"):
+                prev_dates = [d for d in available_dates if d < current_date_val]
+                if prev_dates:
+                    prev_date = prev_dates[-1]
+                    st.session_state[date_idx_key] = available_dates.index(prev_date)
+                    st.session_state[date_override_key] = None
                     st.rerun()
+                else:
+                    st.toast("已是最早可用日期")
 
         with col_next:
             st.write("")
             st.write("")
-            if st.button("后一天 ➡️"):
-                if st.session_state.selected_date_idx < len(available_dates) - 1:
-                    st.session_state.selected_date_idx += 1
+            if st.button("后一天"):
+                next_dates = [d for d in available_dates if d > current_date_val]
+                if next_dates:
+                    next_date = next_dates[0]
+                    st.session_state[date_idx_key] = available_dates.index(next_date)
+                    st.session_state[date_override_key] = None
                     st.rerun()
+                else:
+                    st.toast("已是最新可用日期")
 
         with col_slider:
-            current_date_val = available_dates[st.session_state.selected_date_idx]
+            max_date = max(last_available_date, today)
             picked_date = st.date_input(
                 "日期",
                 value=current_date_val,
                 min_value=available_dates[0],
-                max_value=available_dates[-1],
+                max_value=max_date,
                 label_visibility="collapsed"
             )
 
             if picked_date != current_date_val:
                 if picked_date in available_dates:
-                    st.session_state.selected_date_idx = available_dates.index(picked_date)
+                    st.session_state[date_idx_key] = available_dates.index(picked_date)
+                    st.session_state[date_override_key] = None
                 else:
-                    closest_date = min(available_dates, key=lambda d: abs(d - picked_date))
-                    st.session_state.selected_date_idx = available_dates.index(closest_date)
-                    st.toast(f"📅 休市日，已自动定位到最近交易日: {closest_date}")
+                    st.session_state[date_override_key] = picked_date
                 st.rerun()
 
-        target_dates = [available_dates[st.session_state.selected_date_idx]]
-        selected_date = target_dates[0]
-    if "last_selected_date" not in st.session_state:
-        st.session_state.last_selected_date = selected_date
-    if st.session_state.last_selected_date != selected_date:
-        st.session_state["show_intraday"] = False
-        st.session_state.last_selected_date = selected_date
-
+        selected_date = st.session_state[date_override_key] or available_dates[st.session_state[date_idx_key]]
+        target_dates = [selected_date]
     else:
         with mode_col2:
+            max_date = max(last_available_date, today)
+            range_start = available_dates[-5] if len(available_dates) > 5 else available_dates[0]
+            range_end = max_date
+            if range_start > range_end:
+                range_start = available_dates[0]
             date_range = st.date_input(
                 "选择时间范围 (建议不超过5天，否则加载较慢)",
-                value=[available_dates[-5] if len(available_dates) > 5 else available_dates[0], available_dates[-1]],
+                value=[range_start, range_end],
                 min_value=available_dates[0],
-                max_value=available_dates[-1]
+                max_value=max_date
             )
 
         if len(date_range) == 2:
             start_d, end_d = date_range
             target_dates = [d for d in available_dates if start_d <= d <= end_d]
+            if end_d > last_available_date:
+                st.warning(f"结束日期超出已缓存日期，当前仅展示到 {last_available_date}。")
+                if st.button("拉取最新数据", key="fetch_latest_range"):
+                    st.session_state.manual_fetch_requested = True
+                    st.rerun()
             if not target_dates:
-                st.warning("⚠️ 选定范围内无交易数据，已自动重置为最近交易日")
+                st.warning("⚠️ 选定范围内无交易数据，已回退到最近交易日")
                 target_dates = [available_dates[-1]]
             st.info(f"已选择 {len(target_dates)} 个交易日进行拼接展示")
             selected_date = target_dates[-1]
@@ -282,10 +338,22 @@ if nav_option == "📊 盘面回放":
             target_dates = [available_dates[-1]]
             selected_date = available_dates[-1]
 
+    last_date_key = f"last_selected_date_{selected_pool}"
+    if last_date_key not in st.session_state:
+        st.session_state[last_date_key] = selected_date
+    if st.session_state[last_date_key] != selected_date:
+        st.session_state["show_intraday"] = False
+        st.session_state[last_date_key] = selected_date
+
     daily_df = filtered_df[filtered_df['日期'].dt.date == selected_date].copy()
 
     if daily_df.empty:
         st.warning(f"{selected_date} 当日无交易数据（可能是非交易日或数据缺失）。")
+        if selected_date > last_available_date:
+            st.info("当前日期尚未拉取到缓存，是否现在拉取？")
+            if st.button("拉取最新数据", key="fetch_latest_single_day"):
+                st.session_state.manual_fetch_requested = True
+                st.rerun()
     else:
         median_chg = daily_df['涨跌幅'].median()
         total_turnover = daily_df['成交额'].sum() / 1e8
@@ -317,7 +385,7 @@ if nav_option == "📊 盘面回放":
         st.caption(f"注：这里的排名是基于 **{selected_date}** 当日的数据计算的。如果是多日模式，则展示这些股票在过去几天的走势。")
         st.caption("注：指数贡献 = 涨跌幅 × 权重(近似为成交额/市值占比)。此模式能看到是谁在拉动或砸盘。")
 
-        show_intraday = st.checkbox("加载分时走势 (需从网络实时拉取)", value=False)
+        show_intraday = st.checkbox("加载分时走势 (需从网络实时拉取)", value=False, key="show_intraday")
 
         if show_intraday:
             progress_area = st.empty()

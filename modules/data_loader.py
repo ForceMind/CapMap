@@ -7,7 +7,7 @@ import threading
 from datetime import datetime, timedelta
 import time
 
-from .config import STOCK_POOLS
+from .config import STOCK_POOLS, DATA_DIR
 from .utils import with_retry, get_start_date, add_script_run_ctx, get_script_run_ctx
 
 
@@ -16,7 +16,37 @@ def log_info(message):
     print(f"[{ts}] {message}")
 
 
+_PROXY_DISABLED_LOGGED = False
+
+
+def _disable_proxy_env():
+    """
+    默认禁用系统代理，避免 Eastmoney 接口触发 ProxyError。
+    如需启用代理：设置环境变量 CAPMAP_USE_PROXY=1 或注释此函数调用。
+    """
+    global _PROXY_DISABLED_LOGGED
+    if os.environ.get("CAPMAP_USE_PROXY") == "1":
+        return False
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        if key in os.environ:
+            os.environ[key] = ""
+    os.environ["NO_PROXY"] = "push2his.eastmoney.com,82.push2.eastmoney.com,*.eastmoney.com"
+    if not _PROXY_DISABLED_LOGGED:
+        log_info("已禁用系统代理(默认)。如需启用代理，请设置 CAPMAP_USE_PROXY=1")
+        _PROXY_DISABLED_LOGGED = True
+    return True
+
+
+def _stop_requested():
+    try:
+        return bool(st.session_state.get("stop_fetch_requested"))
+    except Exception:
+        return False
+
+
 def build_fetch_plan(pool_name, max_workers, request_delay, fetch_spot):
+    _disable_proxy_env()
+
     config = STOCK_POOLS.get(pool_name, STOCK_POOLS["沪深300 (大盘)"])
     cache_file = config["cache"]
     index_code = config["code"]
@@ -38,7 +68,7 @@ def build_fetch_plan(pool_name, max_workers, request_delay, fetch_spot):
     if last_cached_date:
         start_date_str = (last_cached_date + timedelta(days=1)).strftime("%Y%m%d")
     else:
-        start_date_str = get_start_date(2)
+        start_date_str = get_start_date(months_back=3)
     end_date_str = today.strftime("%Y%m%d")
 
     total_stocks = None
@@ -81,14 +111,16 @@ def build_fetch_plan(pool_name, max_workers, request_delay, fetch_spot):
 def fetch_history_data(
     pool_name="沪深300 (大盘)",
     allow_download=True,
-    max_workers=10,
-    request_delay=0.0,
+    max_workers=3,
+    request_delay=0.5,
     fetch_spot=True
 ):
     """
-    获取指定成分股过去2年的日线数据。
+    获取指定成分股近 3 个月的日线数据（可配置）。
     逻辑复刻自 app1.py (稳定版)，支持多指数池。
     """
+    _disable_proxy_env()
+
     config = STOCK_POOLS.get(pool_name, STOCK_POOLS["沪深300 (大盘)"])
     cache_file = config["cache"]
     index_code = config["code"]
@@ -97,6 +129,7 @@ def fetch_history_data(
     last_cached_date = None
 
     # 1. 尝试加载本地缓存
+    cache_min_codes = 50
     if os.path.exists(cache_file):
         try:
             cached_df = pd.read_parquet(cache_file)
@@ -108,8 +141,28 @@ def fetch_history_data(
             st.error(f"读取缓存文件失败: {e}")
             log_info(f"读取缓存失败: {pool_name} | {e}")
 
+    if not cached_df.empty:
+        try:
+            unique_codes = cached_df['代码'].astype(str).nunique()
+        except Exception:
+            unique_codes = 0
+        if unique_codes < cache_min_codes:
+            st.warning(f"检测到缓存样本过少({unique_codes}只)，将忽略该缓存并重新拉取。")
+            log_info(f"缓存可能不完整: {pool_name} | 唯一码 {unique_codes}")
+            try:
+                os.remove(cache_file)
+                log_info(f"已删除不完整缓存: {cache_file}")
+            except Exception:
+                pass
+            cached_df = pd.DataFrame()
+            last_cached_date = None
+
     if not allow_download:
         log_info(f"已关闭自动拉取: {pool_name} | 仅使用缓存")
+        return cached_df
+
+    if _stop_requested():
+        log_info("检测到中断请求，已取消拉取")
         return cached_df
 
     max_workers = max(1, int(max_workers))
@@ -122,7 +175,7 @@ def fetch_history_data(
              return cached_df
         start_date_str = (last_cached_date + timedelta(days=1)).strftime("%Y%m%d")
     else:
-        start_date_str = get_start_date(2)
+        start_date_str = get_start_date(months_back=3)
         
     end_date_str = today.strftime("%Y%m%d")
 
@@ -166,9 +219,12 @@ def fetch_history_data(
             code_col = cons_df.columns[0]
             name_col = cons_df.columns[1]
             
-        # 强转 String
-        stock_list = cons_df[code_col].apply(str).tolist() 
-        stock_names = dict(zip(stock_list, cons_df[name_col]))
+        # 强转为 6 位股票代码
+        code_series = cons_df[code_col].astype(str)
+        code_series = code_series.str.extract(r'(\d{6})', expand=False).fillna(code_series)
+        code_series = code_series.str.zfill(6)
+        stock_names = dict(zip(code_series.tolist(), cons_df[name_col].astype(str)))
+        stock_list = list(dict.fromkeys(code_series.tolist()))
         
         # --- 尝试获取今日实时数据 (Spot) ---
         today_spot_map = {}
@@ -179,6 +235,8 @@ def fetch_history_data(
                 spot_df = ak.stock_zh_a_spot_em()
                 if spot_df is not None and not spot_df.empty:
                     spot_df['代码'] = spot_df['代码'].astype(str)
+                    spot_df['代码'] = spot_df['代码'].str.extract(r'(\d{6})', expand=False).fillna(spot_df['代码'])
+                    spot_df['代码'] = spot_df['代码'].str.zfill(6)
                     
                     # 1. 更新名称映射
                     new_names = dict(zip(spot_df['代码'], spot_df['名称']))
@@ -193,7 +251,24 @@ def fetch_history_data(
 
         new_data_list = []
         total_stocks = len(stock_list)
+        success_count = 0
+        fail_count = 0
+        fail_samples = []
+        empty_samples = []
+        proxy_error_seen = False
+        stop_triggered = False
+        fail_lock = threading.Lock()
         log_info(f"开始获取日线: {pool_name} | 股票数 {total_stocks} | 线程 {max_workers} | 延迟 {request_delay}s")
+
+        def _record_sample(bucket, message):
+            with fail_lock:
+                if len(bucket) < 5:
+                    bucket.append(message)
+
+        def _record_proxy_error():
+            nonlocal proxy_error_seen
+            with fail_lock:
+                proxy_error_seen = True
 
         # 循环获取历史
         def fetch_one_stock(code, name):
@@ -226,21 +301,28 @@ def fetch_history_data(
                                  '名称': name
                              }])
                              df_hist = pd.concat([df_hist, new_row], ignore_index=True)
-                        except:
+                        except Exception:
                             pass
                 
                 if df_hist is not None and not df_hist.empty:
                     # 确保列存在
                     cols_needed = ['日期', '收盘', '涨跌幅', '成交额']
                     for c in cols_needed:
-                        if c not in df_hist.columns: return None
+                        if c not in df_hist.columns:
+                            _record_sample(fail_samples, f"{code} 缺列:{c}")
+                            return None
                     
                     df_hist = df_hist[cols_needed].copy()
                     df_hist['代码'] = code
                     df_hist['名称'] = name
                     return df_hist
-            except Exception:
-                pass
+
+                _record_sample(empty_samples, code)
+            except Exception as e:
+                msg = str(e)
+                if "proxy" in msg.lower():
+                    _record_proxy_error()
+                _record_sample(fail_samples, f"{code} {msg}")
             return None
         # Use concurrency as in app1.py
         ctx = get_script_run_ctx()
@@ -250,32 +332,63 @@ def fetch_history_data(
             return fetch_one_stock(code, name)
         if max_workers <= 1:
             for i, code in enumerate(stock_list):
-                if request_delay > 0:
-                    time.sleep(request_delay)
+                if _stop_requested():
+                    stop_triggered = True
+                    log_info("检测到中断请求，停止拉取")
+                    break
                 name = stock_names.get(code, code)
                 res = fetch_one_stock(code, name)
                 if res is not None:
                     new_data_list.append(res)
+                    success_count += 1
+                else:
+                    fail_count += 1
                 if i % 10 == 0:
                     progress_bar.progress((i + 1) / total_stocks)
-                    status_text.text(f"?????? [{pool_name}]: {i+1}/{total_stocks}")
+                    status_text.text(f"正在获取日线 [{pool_name}]: {i+1}/{total_stocks}")
         else:
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                  future_map = {executor.submit(fetch_one_stock_wrapper, c, stock_names.get(c, c)): c for c in stock_list}
                  
                  for i, future in enumerate(concurrent.futures.as_completed(future_map)):
+                     if _stop_requested():
+                         stop_triggered = True
+                         log_info("检测到中断请求，停止拉取")
+                         executor.shutdown(cancel_futures=True)
+                         break
                      # Update progress
                      if i % 10 == 0:
                          progress_bar.progress((i + 1) / total_stocks)
-                         status_text.text(f"?????? [{pool_name}]: {i+1}/{total_stocks}")
+                         status_text.text(f"正在获取日线 [{pool_name}]: {i+1}/{total_stocks}")
                      
                      res = future.result()
                      if res is not None:
                          new_data_list.append(res)
+                         success_count += 1
+                     else:
+                         fail_count += 1
         status_text.empty()
         progress_bar.empty()
-        log_info(f"完成日线获取: {pool_name} | 新批次数 {len(new_data_list)}")
-        
+        log_info(f"完成日线获取: {pool_name} | 成功 {success_count} | 失败 {fail_count}")
+        if proxy_error_seen:
+            log_info("检测到代理错误: 已默认禁用代理。如需启用，请设置 CAPMAP_USE_PROXY=1")
+        if stop_triggered:
+            st.warning("已收到中断请求，本次拉取已停止。")
+        if fail_samples:
+            log_info("失败样例: " + " | ".join(fail_samples))
+        if empty_samples:
+            log_info("空数据样例: " + ", ".join(empty_samples))
+        if total_stocks:
+            min_success = max(5, int(total_stocks * 0.1))
+            if success_count < min_success:
+                st.warning(f"日线成功率过低: {success_count}/{total_stocks}，疑似被限频或网络异常。建议将并发调为1，间隔≥2秒后重试。")
+                if cached_df.empty:
+                    return pd.DataFrame()
+                return cached_df
+        if not new_data_list and cached_df.empty:
+            st.error("日线拉取全部失败，可能是网络/代理/限频导致。请降低并发、增大间隔后重试。")
+            return pd.DataFrame()
+
         # 合并逻辑
         if new_data_list:
             new_df = pd.concat(new_data_list, ignore_index=True)
@@ -307,8 +420,9 @@ def fetch_history_data(
         # 保存缓存
         if new_data_list or cached_df.empty:
             try:
-                if not os.path.exists("data"):
-                    os.makedirs("data")
+                cache_dir = os.path.dirname(cache_file)
+                if cache_dir and not os.path.exists(cache_dir):
+                    os.makedirs(cache_dir, exist_ok=True)
                 final_df.to_parquet(cache_file)
                 if not cached_df.empty:
                     st.toast(f"💾 [{pool_name}] 增量数据已合并并保存")
@@ -325,6 +439,17 @@ def fetch_history_data(
         st.error(f"全局数据错误: {e}")
         return pd.DataFrame()
 
+MIN_CACHE_DIR = str(DATA_DIR / "min_cache")
+
+
+def _min_cache_path(symbol, date_str, period, is_index):
+    safe_symbol = str(symbol).replace("/", "_")
+    safe_date = str(date_str).replace(":", "").replace(" ", "_")
+    suffix = "idx" if is_index else "stk"
+    filename = f"{safe_symbol}_{safe_date}_{period}_{suffix}.parquet"
+    return os.path.join(MIN_CACHE_DIR, filename)
+
+
 @st.cache_data(ttl=3600*24, show_spinner=False)
 def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
     """
@@ -333,6 +458,18 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
     params:
     period: '1', '5', '15', '30', '60'
     """
+    _disable_proxy_env()
+    cache_path = _min_cache_path(symbol, date_str, period, is_index)
+    if os.path.exists(cache_path):
+        try:
+            cached_df = pd.read_parquet(cache_path)
+            if cached_df is not None and not cached_df.empty:
+                if 'time' in cached_df.columns:
+                    cached_df['time'] = pd.to_datetime(cached_df['time'])
+                return cached_df
+        except Exception:
+            pass
+
     start_time = f"{date_str} 09:30:00"
     end_time = f"{date_str} 15:00:00"
     
@@ -369,7 +506,13 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
                 base_price = df['open'].iloc[0]
                 df['pct_chg'] = (df['close'] - base_price) / base_price * 100
                 
-                return df[['time', 'pct_chg', 'close']]
+                result_df = df[['time', 'pct_chg', 'close']]
+                try:
+                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    result_df.to_parquet(cache_path)
+                except Exception:
+                    pass
+                return result_df
                 
         except Exception:
             # 失败处理逻辑
@@ -452,15 +595,15 @@ def background_prefetch_task(date_list, origin_df):
 
 def fetch_intraday_data_v2(stock_codes, target_date_str, period='1', max_workers=1, request_delay=0.0):
     """
-    ???????? + ???? ?????? (???)?
+    分时数据 + 指数分时走势合并 (新版)
     """
     results = []
     log_info(f"开始获取分时: {target_date_str} | 标的数 {len(stock_codes)} | 周期 {period} | 线程 {max_workers} | 延迟 {request_delay}s")
     
     indices_map = {
-        '000300': '??300',
-        '000001': '????',
-        '399001': '????'
+        '000300': '沪深300',
+        '000001': '上证指数',
+        '399001': '深证成指'
     }
 
     tasks = []

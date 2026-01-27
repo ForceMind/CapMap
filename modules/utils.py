@@ -19,7 +19,19 @@ def with_retry(func, retries=3, delay=1.0, default=None):
                 return default
             time.sleep(delay * (i + 1)) # 指数退避
 
-def get_start_date(years_back=2):
-    """计算 N 年前的日期，返回 YYYYMMDD 字符串"""
-    target = datetime.now() - timedelta(days=365 * years_back)
+def get_start_date(years_back=None, months_back=None, days_back=None):
+    """计算起始日期，返回 YYYYMMDD 字符串。
+    默认使用近 3 个月；可按年/月/天指定。
+    """
+    if days_back is not None:
+        target = datetime.now() - timedelta(days=days_back)
+    elif months_back is not None:
+        target = datetime.now() - timedelta(days=30 * months_back)
+    else:
+        if years_back is None:
+            years_back = 0
+            months_back = 3
+            target = datetime.now() - timedelta(days=30 * months_back)
+        else:
+            target = datetime.now() - timedelta(days=365 * years_back)
     return target.strftime("%Y%m%d")
