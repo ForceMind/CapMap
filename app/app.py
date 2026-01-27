@@ -129,11 +129,6 @@ def _read_min_cache(path):
             return pd.read_csv(path, parse_dates=["time"])
         except Exception as e:
             logger.warning("读取分时缓存失败: %s", e)
-    if raise_on_error:
-        if last_err is not None:
-            raise last_err
-        raise RuntimeError("接口返回空或无数据")
-
     return None
 
 def _write_min_cache(path, df):
