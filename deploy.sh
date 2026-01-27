@@ -16,6 +16,7 @@ BASE_PATH="${BASE_PATH:-capmap}"
 HOST="${HOST:-0.0.0.0}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-}"
 PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:-}"
+BIYING_LICENCE="${BIYING_LICENCE:-}"
 
 NGINX_SETUP="${NGINX_SETUP:-yes}"
 NGINX_PORT="${NGINX_PORT:-80}"
@@ -43,6 +44,11 @@ if [[ -t 0 ]]; then
   read -r -p "可选：请输入 pip 源（留空使用默认，如 https://pypi.org/simple）: " INPUT_PIP
   if [[ -n "${INPUT_PIP:-}" ]]; then
     PIP_INDEX_URL="$INPUT_PIP"
+  fi
+
+  read -r -p "可选：请输入必盈 licence（留空跳过）: " INPUT_LICENCE
+  if [[ -n "${INPUT_LICENCE:-}" ]]; then
+    BIYING_LICENCE="$INPUT_LICENCE"
   fi
 
   read -r -p "是否配置 Nginx 反代（默认 Y）: " INPUT_NGX
@@ -167,6 +173,40 @@ sys.exit(0 if (sys.version_info.major, sys.version_info.minor) >= (min_major, mi
 PY
 }
 
+write_provider_config() {
+  if [[ -z "${BIYING_LICENCE:-}" ]]; then
+    return 0
+  fi
+  local cfg_path="$APP_ROOT/data/provider_config.json"
+  BIYING_LICENCE_INPUT="$BIYING_LICENCE" PROVIDER_CONFIG_PATH="$cfg_path" "$PYTHON_EXE" - <<'PY'
+import json
+import os
+
+licence = os.environ.get("BIYING_LICENCE_INPUT", "").strip()
+path = os.environ.get("PROVIDER_CONFIG_PATH", "").strip()
+if not licence or not path:
+    raise SystemExit(0)
+
+os.makedirs(os.path.dirname(path), exist_ok=True)
+data = {}
+if os.path.exists(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f) if f else {}
+    except Exception:
+        data = {}
+
+order = data.get("provider_order")
+if not isinstance(order, list) or not order:
+    data["provider_order"] = ["biying", "akshare"]
+
+data["biying_licence"] = licence
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False)
+PY
+  echo "已写入必盈 licence 到 $cfg_path"
+}
+
 PYTHON_EXE="$(pick_python || true)"
 if [[ -z "$PYTHON_EXE" ]]; then
   echo "未检测到 Python，尝试安装..."
@@ -190,6 +230,7 @@ if ! check_python_version "$PYTHON_EXE"; then
 fi
 
 echo "使用 Python：$PYTHON_EXE"
+write_provider_config
 
 if ! "$PYTHON_EXE" -m venv "$VENV_DIR"; then
   echo "venv 创建失败，尝试安装 venv 组件..."
