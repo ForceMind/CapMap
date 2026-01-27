@@ -1692,9 +1692,9 @@ if not origin_df.empty:
                     tab1, tab2 = st.tabs(["沪市 (SH)", "深市 (SZ)"])
                     
                     with tab1:
-                        st.plotly_chart(plot_intraday_v3(sh_stocks, sh_index, f"沪市 - {chart_mode}"), use_container_width=True)
+                        st.plotly_chart(plot_intraday_v3(sh_stocks, sh_index, f"沪市 - {chart_mode}"), width="stretch")
                     with tab2:
-                        st.plotly_chart(plot_intraday_v3(sz_stocks, sz_index, f"深市 - {chart_mode}"), use_container_width=True)
+                        st.plotly_chart(plot_intraday_v3(sz_stocks, sz_index, f"深市 - {chart_mode}"), width="stretch")
         
         # --- 可视化 ---
         st.subheader(f"📊 {selected_date.strftime('%Y年%m月%d日')} 市场全景热力图")
@@ -1730,7 +1730,7 @@ if not origin_df.empty:
             coloraxis_colorbar=dict(title="涨跌幅(%)")
         )
         
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
         
         # 可选：显示详细数据表
         with st.expander("查看当日详细数据"):
@@ -1836,7 +1836,7 @@ if not origin_df.empty:
         )
         fig_scatter.update_traces(textposition='top center')
         fig_scatter.update_layout(height=600)
-        st.plotly_chart(fig_scatter, use_container_width=True)
+        st.plotly_chart(fig_scatter, width="stretch")
         
         # 5. 榜单
         col_list1, col_list2 = st.columns(2)
