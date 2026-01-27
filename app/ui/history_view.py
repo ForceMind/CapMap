@@ -564,34 +564,44 @@ def render_history_view(df, available_dates):
     max_limit = 7
     min_limit = -7
     
-    fig = px.treemap(
-        daily_df,
-        path=['名称'],
-        values='成交额', # 用成交额代表热度/权重 (因为历史市值难获取)
-        color='涨跌幅',
-        color_continuous_scale=['#00a65a', '#ffffff', '#dd4b39'], # 绿 -> 白 -> 红
-        range_color=[min_limit, max_limit],
-        hover_data={
-            '名称': True,
-            '代码': True,
-            '收盘': True,
-            '涨跌幅': ':.2f',
-            '成交额': True
-        },
-        height=650
-    )
+    # 数据清洗：移除空名称和零成交额的记录，防止 Treemap 报错 "Non-leaves rows are not permitted"
+    # 当 '名称' 为空字符串时，Plotly 会将其误判为根节点，导致层级冲突
+    valid_mask = (daily_df['名称'].notna()) & (daily_df['名称'].astype(str).str.strip() != "") & (daily_df['成交额'] > 0)
+    plot_df = daily_df[valid_mask].copy()
     
-    # 优化显示
-    fig.update_traces(
-        textinfo="label+value+percent entry",
-        hovertemplate="<b>%{label}</b><br>收盘价: %{customdata[2]}<br>涨跌幅: %{color:.2f}%<br>成交额: %{value:.2s}"
-    )
-    fig.update_layout(
-        margin=dict(t=10, l=10, r=10, b=10),
-        coloraxis_colorbar=dict(title="涨跌幅(%)")
-    )
+    if plot_df.empty:
+        st.warning("暂无足够数据绘制市场全景热力图")
+    else:
+        fig = px.treemap(
+            plot_df,
+            path=['名称'],
+            values='成交额', # 用成交额代表热度/权重 (因为历史市值难获取)
+            color='涨跌幅',
+            color_continuous_scale=['#00a65a', '#ffffff', '#dd4b39'], # 绿 -> 白 -> 红
+            range_color=[min_limit, max_limit],
+            hover_data={
+                '名称': True,
+                '代码': True,
+                '收盘': True,
+                '涨跌幅': ':.2f',
+                '成交额': True
+            },
+            height=650
+        )
+        
+        # 优化显示
+        fig.update_traces(
+            textinfo="label+value+percent entry",
+            hovertemplate="<b>%{label}</b><br>收盘价: %{customdata[2]}<br>涨跌幅: %{color:.2f}%<br>成交额: %{value:.2s}"
+        )
+        fig.update_layout(
+            margin=dict(t=10, l=10, r=10, b=10),
+            coloraxis_colorbar=dict(title="涨跌幅(%)")
+        )
+        
+        st.plotly_chart(fig, width="stretch")
     
-    st.plotly_chart(fig, width="stretch")
+    # 可选：显示详细数据表
     
     # 可选：显示详细数据表
     with st.expander("查看当日详细数据"):
