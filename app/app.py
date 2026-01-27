@@ -45,6 +45,12 @@ NAME_MAP_VERSION = 1
 APP_LOG_FILE = "logs/app.log"
 INTRADAY_WORKERS = int(os.environ.get("INTRADAY_WORKERS", "1"))
 INTRADAY_DELAY_SEC = float(os.environ.get("INTRADAY_DELAY_SEC", "0.5"))
+AUTO_PREFETCH_ENABLED = os.environ.get("AUTO_PREFETCH_ENABLED", "1") == "1"
+AUTO_PREFETCH_TIME = os.environ.get("AUTO_PREFETCH_TIME", "15:15")
+AUTO_PREFETCH_DELAY_SEC = float(os.environ.get("AUTO_PREFETCH_DELAY_SEC", "10"))
+AUTO_PREFETCH_RETRY_SLEEP_SEC = float(os.environ.get("AUTO_PREFETCH_RETRY_SLEEP_SEC", "300"))
+AUTO_PREFETCH_MAX_RETRIES = int(os.environ.get("AUTO_PREFETCH_MAX_RETRIES", "0"))
+AUTO_PREFETCH_STATE_FILE = "data/auto_prefetch_state.json"
 
 def _init_logging():
     log_path = os.path.abspath(APP_LOG_FILE)
@@ -141,6 +147,177 @@ def _write_min_cache(path, df):
         os.replace(tmp_path, path)
     except Exception as e:
         logger.warning("保存分时缓存失败: %s", e)
+
+def _parse_hhmm(value):
+    try:
+        parts = str(value).split(":")
+        if len(parts) == 2:
+            return int(parts[0]), int(parts[1])
+    except Exception:
+        pass
+    return 15, 15
+
+def _load_prefetch_state():
+    if not os.path.exists(AUTO_PREFETCH_STATE_FILE):
+        return {}
+    try:
+        with open(AUTO_PREFETCH_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception as e:
+        logger.warning("\u8bfb\u53d6\u81ea\u52a8\u9884\u53d6\u72b6\u6001\u5931\u8d25: %s", e)
+    return {}
+
+def _save_prefetch_state(state):
+    try:
+        os.makedirs(os.path.dirname(AUTO_PREFETCH_STATE_FILE), exist_ok=True)
+        with open(AUTO_PREFETCH_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception as e:
+        logger.warning("\u4fdd\u5b58\u81ea\u52a8\u9884\u53d6\u72b6\u6001\u5931\u8d25: %s", e)
+
+def _is_trading_day(target_date, origin_df):
+    if origin_df is None or origin_df.empty:
+        return False
+    try:
+        return target_date in set(origin_df['日期'].dt.date)
+    except Exception:
+        return False
+
+def _get_daily_codes(origin_df, target_date):
+    if origin_df is None or origin_df.empty:
+        return [], {}
+    daily = origin_df[origin_df['日期'].dt.date == target_date]
+    if daily.empty:
+        return [], {}
+    codes = daily['代码'].astype(str).tolist()
+    name_map = dict(zip(daily['代码'].astype(str), daily['名称']))
+    return codes, name_map
+
+def _scan_cached_dates(period='1', is_index=False):
+    base = os.path.join(MIN_CACHE_DIR, f"p{period}", "index" if is_index else "stock")
+    if not os.path.exists(base):
+        return []
+    dates = set()
+    for root, _, files in os.walk(base):
+        for f in files:
+            if f.endswith('.csv'):
+                dates.add(f[:-4])
+    return sorted(dates)
+
+def _get_cached_codes_for_date(date_key, codes, period='1', is_index=False):
+    cached = set()
+    for code in codes:
+        path = _min_cache_path(code, date_key, period, is_index)
+        if os.path.exists(path):
+            cached.add(code)
+    return cached
+
+def _serial_fetch_intraday(date_str, codes, name_map, include_indices=True, delay_sec=10, retry_sleep_sec=300, max_retries=3, job_tag="manual"):
+    indices_map = {
+        "000300": "\ud83d\udcca \u6caa\u6df1300",
+        "000001": "\ud83d\udcc8 \u4e0a\u8bc1\u6307\u6570",
+        "399001": "\ud83d\udcc9 \u6df1\u8bc1\u6210\u6307",
+    }
+    tasks = []
+    if include_indices:
+        for idx_code, idx_name in indices_map.items():
+            tasks.append({"code": idx_code, "name": idx_name, "is_index": True})
+    for code in codes:
+        tasks.append({"code": str(code), "name": name_map.get(str(code), str(code)), "is_index": False})
+    logger.info("\u4efb\u52a1\u5f00\u59cb(%s): date=%s total=%s delay=%.1fs retry=%.0fs max_retries=%s", job_tag, date_str, len(tasks), delay_sec, retry_sleep_sec, max_retries)
+    success = 0
+    failed = 0
+    for t in tasks:
+        code = t['code']
+        name = t['name']
+        is_index = t['is_index']
+        api_name = "index_zh_a_hist_min_em" if is_index else "stock_zh_a_hist_min_em"
+        attempt = 0
+        while True:
+            try:
+                data = fetch_cached_min_data(code, date_str, is_index=is_index, period='1', raise_on_error=True)
+                if data is None or data.empty:
+                    raise RuntimeError("\u63a5\u53e3\u8fd4\u56de\u7a7a")
+                success += 1
+                logger.info("\u9884\u53d6\u6210\u529f(%s): code=%s name=%s api=%s", job_tag, code, name, api_name)
+                break
+            except Exception as e:
+                attempt += 1
+                logger.warning("\u9884\u53d6\u5931\u8d25(%s): code=%s name=%s api=%s attempt=%s err=%s", job_tag, code, name, api_name, attempt, e)
+                if max_retries > 0 and attempt >= max_retries:
+                    failed += 1
+                    logger.warning("\u9884\u53d6\u653e\u5f03(%s): code=%s name=%s", job_tag, code, name)
+                    break
+                time.sleep(retry_sleep_sec)
+        if delay_sec > 0:
+            time.sleep(delay_sec)
+    logger.info("\u4efb\u52a1\u5b8c\u6210(%s): date=%s success=%s failed=%s", job_tag, date_str, success, failed)
+    return success, failed
+
+def _auto_prefetch_worker(date_str, codes, name_map, ctx=None):
+    if ctx:
+        add_script_run_ctx(threading.current_thread(), ctx)
+    state = {"date": date_str, "status": "running", "updated": int(time.time())}
+    _save_prefetch_state(state)
+    success, failed = _serial_fetch_intraday(
+        date_str,
+        codes,
+        name_map,
+        include_indices=True,
+        delay_sec=AUTO_PREFETCH_DELAY_SEC,
+        retry_sleep_sec=AUTO_PREFETCH_RETRY_SLEEP_SEC,
+        max_retries=AUTO_PREFETCH_MAX_RETRIES,
+        job_tag="auto",
+    )
+    state = {"date": date_str, "status": "done" if failed == 0 else "partial", "success": success, "failed": failed, "updated": int(time.time())}
+    _save_prefetch_state(state)
+
+def _start_manual_prefetch(date_str, codes, name_map, include_indices=True):
+    if not codes and not include_indices:
+        return False
+    ctx = get_script_run_ctx()
+    def _worker():
+        if ctx:
+            add_script_run_ctx(threading.current_thread(), ctx)
+        _serial_fetch_intraday(
+            date_str,
+            codes,
+            name_map,
+            include_indices=include_indices,
+            delay_sec=AUTO_PREFETCH_DELAY_SEC,
+            retry_sleep_sec=AUTO_PREFETCH_RETRY_SLEEP_SEC,
+            max_retries=AUTO_PREFETCH_MAX_RETRIES,
+            job_tag="manual",
+        )
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    return True
+
+def _start_auto_prefetch_if_needed(origin_df):
+    if not AUTO_PREFETCH_ENABLED:
+        return
+    now = datetime.now()
+    h, m = _parse_hhmm(AUTO_PREFETCH_TIME)
+    if now.hour < h or (now.hour == h and now.minute < m):
+        return
+    today = now.date()
+    if not _is_trading_day(today, origin_df):
+        return
+    today_str = today.strftime("%Y-%m-%d")
+    state = _load_prefetch_state()
+    if state.get("date") == today_str and state.get("status") in ("running", "done"):
+        return
+    codes, name_map = _get_daily_codes(origin_df, today)
+    if not codes:
+        return
+    if st.session_state.get("auto_prefetch_started"):
+        return
+    st.session_state["auto_prefetch_started"] = True
+    ctx = get_script_run_ctx()
+    t = threading.Thread(target=_auto_prefetch_worker, args=(today_str, codes, name_map, ctx), daemon=True)
+    t.start()
 
 def _load_name_refresh_state():
     if not os.path.exists(NAME_REFRESH_FILE):
@@ -1084,6 +1261,7 @@ with st.sidebar:
 # 加载数据
 with st.spinner("正在初始化历史数据仓库..."):
     origin_df = fetch_history_data()
+    _start_auto_prefetch_if_needed(origin_df)
 
 # --- 后台任务检测与控制 ---
 # 检查是否有名为 "PrefetchWorker" 的后台线程
@@ -1098,7 +1276,7 @@ with st.sidebar:
     st.markdown("---")
     
     # 导航栏
-    nav_option = st.radio("📡 功能导航", ["⏪ 历史盘面回放", "🌊 资金偏离分析"], index=0)
+    nav_option = st.radio("📡 功能导航", ["⏪ 历史盘面回放", "🌊 资金偏离分析", "🗂️ 数据管理"], index=0)
     prev_nav = st.session_state.get("nav_option_prev")
     if prev_nav != nav_option:
         st.session_state["nav_option_prev"] = nav_option
@@ -1421,9 +1599,6 @@ if not origin_df.empty:
             # 并发线程中缓存的 show_spinner=False 已经设置，这里应该安全了
             status_text = st.empty()
             fetch_progress = st.progress(0)
-                 
-            detail_lines = []
-            detail_box = st.empty()
             for i, d_date in enumerate(target_dates_to_fetch):
                 status_text.text(f"🔄 \u6b63\u5728\u83b7\u53d6: {d_date.strftime('%Y-%m-%d')} | \u5468\u671f={period_to_use}\u5206\u949f | \u76ee\u6807={len(target_stocks_list)}+\u6307\u65703 ({i+1}/{total_steps})")
                 fetch_progress.progress((i + 1) / total_steps)
@@ -1442,23 +1617,9 @@ if not origin_df.empty:
                     for err in day_failures[:3]:
                         logger.warning("\u5206\u65f6\u5931\u8d25: code=%s name=%s api=%s reason=%s", err.get('code'), err.get('name'), err.get('api'), err.get('reason'))
 
-                detail_lines.append(f"{d_str} | \u6210\u529f {success}/{total_req} | \u7f13\u5b58 {cache_hits} | \u7f51\u7edc {network_calls} | \u5931\u8d25 {failed}")
-                if failed:
-                    for err in day_failures[:5]:
-                        detail_lines.append(f"  - {err.get('code')} {err.get('name')} \u63a5\u53e3={err.get('api')} \u539f\u56e0={err.get('reason')}")
-                    if failed > 5:
-                        detail_lines.append(f"  - ... \u8fd8\u6709 {failed-5} \u6761\u5931\u8d25")
-
-                if len(detail_lines) > 120:
-                    detail_lines = detail_lines[-120:]
-                safe_detail = html.escape("\n".join(detail_lines))
-                detail_box.markdown(
-                    f"""<div style=\"max-height:220px; overflow:auto; border:1px solid #ddd; padding:8px; background:#f8f8f8; white-space:pre-wrap; font-family:monospace; font-size:12px;\">{safe_detail}</div>""",
-                    unsafe_allow_html=True,
-                )
                 for res in day_results:
-                        res['data']['date_col'] = d_str
-                        res['real_date'] = d_date
+                    res["data"]["date_col"] = d_str
+                    res["real_date"] = d_date
                 
                 all_intraday_data.extend(day_results)
             
@@ -1761,6 +1922,57 @@ if not origin_df.empty:
                 }),
                 hide_index=True
             )
+
+    elif nav_option == "??? ????":
+        st.subheader("?? ????????")
+        st.caption("?????? 1???????????????")
+        if origin_df is None or origin_df.empty:
+            st.warning("?????????????")
+        else:
+            trading_dates = sorted(origin_df['??'].dt.date.unique())
+            date_strs = [d.strftime("%Y-%m-%d") for d in trading_dates]
+            selected_date_str = st.selectbox("??????", date_strs, index=len(date_strs) - 1)
+            selected_date = datetime.strptime(selected_date_str, "%Y-%m-%d").date()
+            date_key = selected_date_str.replace("-", "")
+            codes, name_map = _get_daily_codes(origin_df, selected_date)
+            st.write(f"???????: {len(codes)}")
+
+            cached_codes = _get_cached_codes_for_date(date_key, codes, period='1', is_index=False)
+            missing_codes = [c for c in codes if c not in cached_codes]
+            st.write(f"??????: {len(cached_codes)}/{len(codes)}")
+            if missing_codes:
+                missing_lines = [f"{c} {name_map.get(c, c)}" for c in missing_codes]
+                st.text_area("????", "\n".join(missing_lines), height=160)
+            else:
+                st.success("????????")
+
+            index_codes = ["000300", "000001", "399001"]
+            cached_idx = _get_cached_codes_for_date(date_key, index_codes, period='1', is_index=True)
+            missing_idx = [c for c in index_codes if c not in cached_idx]
+            st.write(f"??????: {len(cached_idx)}/{len(index_codes)}")
+            if missing_idx:
+                st.warning("????: " + ", ".join(missing_idx))
+            else:
+                st.success("????????")
+
+            st.markdown("### ????")
+            include_indices = st.checkbox("????", value=True)
+            default_codes = missing_codes[:20]
+            select_codes = st.multiselect("????????(??)", options=missing_codes, default=default_codes)
+            if st.button("??????"):
+                started = _start_manual_prefetch(selected_date_str, select_codes, name_map, include_indices=include_indices)
+                if started:
+                    st.info("??????????? logs/app.log?")
+                else:
+                    st.warning("?????????")
+
+            with st.expander("????????"):
+                cached_dates = _scan_cached_dates(period='1', is_index=False)
+                if cached_dates:
+                    readable = [d[:4] + '-' + d[4:6] + '-' + d[6:] for d in cached_dates]
+                    st.text_area("????", "\n".join(readable), height=120)
+                else:
+                    st.write("?????????")
 
     elif nav_option == "🌊 资金偏离分析":
         st.subheader("🌊 资金偏离度分析 (Alpha Divergence)")
