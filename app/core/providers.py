@@ -1,8 +1,11 @@
 import json
 import logging
 import os
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 
 import pandas as pd
 
@@ -11,6 +14,41 @@ LOGGER = logging.getLogger("capmap")
 PROVIDER_CONFIG_FILE = "data/provider_config.json"
 DEFAULT_PROVIDER_ORDER = ["biying", "akshare"]
 BIYING_BASE_URL = os.environ.get("BIYING_BASE_URL", "https://api.biyingapi.com")
+BIYING_QUOTA_FILE = "data/biying_quota.json"
+BIYING_DAILY_LIMIT = 200
+
+def _check_and_consume_quota():
+    try:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        data = {"date": today_str, "count": 0}
+        
+        if os.path.exists(BIYING_QUOTA_FILE):
+            try:
+                with open(BIYING_QUOTA_FILE, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict) and loaded.get("date") == today_str:
+                        data = loaded
+            except Exception:
+                pass
+
+        if data["count"] >= BIYING_DAILY_LIMIT:
+             return False, data["count"]
+
+        data["count"] += 1
+        
+        try:
+            os.makedirs(os.path.dirname(BIYING_QUOTA_FILE), exist_ok=True)
+            with open(BIYING_QUOTA_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except Exception:
+            pass
+            
+        return True, data["count"]
+    except Exception as e:
+        LOGGER.warning(f"Quota check failed: {e}")
+        # If quota check fails, assume allowed but don't crash
+        return True, 0
+
 
 
 def _read_json_file(path):
@@ -114,16 +152,36 @@ def _build_biying_url(path, params=None):
 
 
 def _fetch_biying_json(url, timeout=20):
-    req = urllib.request.Request(url, headers={"User-Agent": "capmap/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        payload = resp.read()
-    try:
-        return json.loads(payload.decode("utf-8"))
-    except Exception:
+    # Check daily quota
+    allowed, count = _check_and_consume_quota()
+    if not allowed:
+        LOGGER.warning(f"Biying daily quota reached ({count}/{BIYING_DAILY_LIMIT}). Switching to fallback.")
+        return None
+
+    retries = 3
+    for i in range(retries):
         try:
-            return json.loads(payload)
-        except Exception:
+            req = urllib.request.Request(url, headers={"User-Agent": "capmap/1.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                payload = resp.read()
+            try:
+                return json.loads(payload.decode("utf-8"))
+            except Exception:
+                try:
+                    return json.loads(payload)
+                except Exception:
+                    return None
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                LOGGER.warning(f"Biying API 429 Limit reached, retrying {i+1}/{retries} after sleep...")
+                time.sleep(2 * (i + 1))
+                continue
+            LOGGER.warning(f"Biying API HTTP Error {e.code}: {e.reason}")
             return None
+        except Exception as e:
+            LOGGER.warning(f"Biying API request failed: {e}")
+            return None
+    return None
 
 
 def _extract_biying_rows(payload):
