@@ -15,6 +15,7 @@ import zipfile
 import shutil
 import json
 import logging
+import html
 
 # 尝试导入 Streamlit 上下文管理器，用于解决多线程 "missing ScriptRunContext" 警告
 try:
@@ -71,6 +72,22 @@ def _init_logging():
 
 logger = _init_logging()
 
+def _fmt_kv(kwargs):
+    parts = []
+    for k, v in kwargs.items():
+        try:
+            parts.append(f"{k}={v}")
+        except Exception:
+            parts.append(f"{k}=?")
+    return " ".join(parts)
+
+def log_action(action, **kwargs):
+    # 仅用于调试前端操作，默认不输出到 INFO 级别日志
+    if kwargs:
+        logger.debug("前端操作: %s | %s", action, _fmt_kv(kwargs))
+    else:
+        logger.debug("前端操作: %s", action)
+
 CODE_COL_CANDIDATES = [
     "\u4ee3\u7801",
     "\u8bc1\u5238\u4ee3\u7801",
@@ -112,6 +129,11 @@ def _read_min_cache(path):
             return pd.read_csv(path, parse_dates=["time"])
         except Exception as e:
             logger.warning("读取分时缓存失败: %s", e)
+    if raise_on_error:
+        if last_err is not None:
+            raise last_err
+        raise RuntimeError("接口返回空或无数据")
+
     return None
 
 def _write_min_cache(path, df):
@@ -462,6 +484,8 @@ def fetch_history_data():
         try:
             logger.info("AKShare 获取成分股列表: 000300")
             cons_df = ak.index_stock_cons(symbol="000300")
+            if cons_df is not None:
+                logger.info("成分股列表获取成功: rows=%s", len(cons_df))
         except:
             if not cached_df.empty:
                 logger.warning("成分股列表获取失败，使用缓存")
@@ -502,6 +526,7 @@ def fetch_history_data():
         if end_date_str >= start_date_str:
              try:
                  logger.info("AKShare 获取实时行情，用于补齐今日数据")
+                 logger.info("调用接口: stock_zh_a_spot_em")
                  spot_df = ak.stock_zh_a_spot_em()
                  if spot_df is not None and not spot_df.empty:
                      # spot_df columns: 代码, 名称, 最新价, 涨跌幅, 成交额 ...
@@ -518,16 +543,18 @@ def fetch_history_data():
         def fetch_one_stock(code, name):
             try:
                 # 获取日线
+                logger.info("调用接口: stock_zh_a_hist code=%s start=%s end=%s", code, start_date_str, end_date_str)
                 df_hist = ak.stock_zh_a_hist(symbol=code, start_date=start_date_str, end_date=end_date_str, adjust="qfq")
-                
                 # 检查是否包含今天
                 # 如果 df_hist 不包含今天，但我们有 today_spot_map，则人工补一行
                 fetched_today = False
                 if df_hist is not None and not df_hist.empty:
+                    logger.info("日线拉取成功: code=%s rows=%s", code, len(df_hist))
                     df_hist['日期'] = pd.to_datetime(df_hist['日期'])
                     if end_date_str in df_hist['日期'].dt.strftime("%Y%m%d").values:
                         fetched_today = True
                 else:
+                    logger.warning("日线接口返回空: code=%s", code)
                     df_hist = pd.DataFrame()
 
                 # 如果没有拉到今天的数据，且我们需要今天 (end_date_str == today)，补全
@@ -561,7 +588,8 @@ def fetch_history_data():
                     df_hist['代码'] = code
                     df_hist['名称'] = name
                     return df_hist
-            except Exception:
+            except Exception as e:
+                logger.warning("日线拉取失败: code=%s err=%s", code, e)
                 pass
             return None
 
@@ -646,7 +674,7 @@ def fetch_history_data():
 
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=3600*24, show_spinner=False)
-def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
+def fetch_cached_min_data(symbol, date_str, is_index=False, period='1', raise_on_error=False):
     """
     原子化获取单个标的的分时数据，独立缓存。
     避免因股票列表组合变化导致整个缓存失效。
@@ -657,7 +685,9 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
     cache_path = _min_cache_path(symbol, date_key, period, is_index)
     cached_df = _read_min_cache(cache_path)
     if cached_df is not None and not cached_df.empty:
+        logger.info("分时缓存命中: code=%s date=%s period=%s index=%s path=%s", symbol, date_str_norm, period, is_index, cache_path)
         return cached_df
+    logger.info("分时缓存未命中，准备网络拉取: code=%s date=%s period=%s index=%s", symbol, date_str_norm, period, is_index)
     logger.info("AKShare 分时拉取: code=%s date=%s period=%s index=%s", symbol, date_str_norm, period, is_index)
 
 
@@ -671,11 +701,14 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
             
     # 简单的重试机制
     max_retries = 3
+    last_err = None
+    api_name = "index_zh_a_hist_min_em" if is_index else "stock_zh_a_hist_min_em"
     
     # 如果处于"冷却期"内? 这里简化为：每次失败后增加等待时间，成功则重置
     
     for attempt in range(max_retries):
         try:
+            logger.info("调用接口: %s code=%s date=%s period=%s", api_name, symbol, date_str_norm, period)
             if is_index:
                 # 指数接口
                 df = ak.index_zh_a_hist_min_em(symbol=symbol, period=period, start_date=start_time, end_date=end_time)
@@ -684,6 +717,7 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
                 df = ak.stock_zh_a_hist_min_em(symbol=symbol, start_date=start_time, end_date=end_time, period=period, adjust='qfq')
             
             if df is not None and not df.empty:
+                logger.info("分时拉取成功: code=%s date=%s period=%s rows=%s", symbol, date_str_norm, period, len(df))
                 # 成功 - 重置退避
                 if fetch_cached_min_data.current_backoff > 0:
                      logger.info("API 恢复，重置退避时间")
@@ -703,8 +737,12 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period='1'):
                 result = df[['time', 'pct_chg', 'close']].copy()
                 _write_min_cache(cache_path, result)
                 return result
+            else:
+                logger.warning("分时接口返回空: code=%s date=%s period=%s api=%s", symbol, date_str_norm, period, api_name)
                 
         except Exception as e:
+            last_err = e
+            logger.warning("分时拉取失败: code=%s date=%s period=%s api=%s err=%s", symbol, date_str_norm, period, api_name, e)
             # 失败处理逻辑
             # 如果是特定的 API 限制错误 (需分析 e，这里简单假设所有异常都可能由频率导致)
             # 增加退避时间
@@ -812,6 +850,7 @@ def fetch_intraday_data_v2(stock_codes, target_date_str, period='1'):
     v3: 引入多线程并发加速
     """
     results = [] 
+    failures = [] 
     
     # 定义需要获取的指数
     indices_map = {
@@ -841,21 +880,57 @@ def fetch_intraday_data_v2(stock_codes, target_date_str, period='1'):
             'to_val': to_val
         })
         
+    stats = {'total': len(tasks), 'success': 0, 'failed': 0, 'cache': 0, 'network': 0}
+
     def _worker(task):
+        is_index = (task['type'] == 'index')
+        api_name = "index_zh_a_hist_min_em" if is_index else "stock_zh_a_hist_min_em"
+        _, date_key = _normalize_date_str(target_date_str)
+        cache_path = _min_cache_path(task['code'], date_key, period, is_index)
+        cached_df = _read_min_cache(cache_path)
+        if cached_df is not None and not cached_df.empty:
+            item = {
+                'code': task['code'],
+                'name': task['name'],
+                'data': cached_df,
+                'turnover': task['to_val'],
+                'is_index': is_index
+            }
+            return item, None, 'cache'
         try:
-            is_index = (task['type'] == 'index')
-            data = fetch_cached_min_data(task['code'], target_date_str, is_index=is_index, period=period)
-            if data is not None:
-                return {
+            data = fetch_cached_min_data(task['code'], target_date_str, is_index=is_index, period=period, raise_on_error=True)
+            if data is not None and not data.empty:
+                item = {
                     'code': task['code'],
                     'name': task['name'],
                     'data': data,
                     'turnover': task['to_val'],
                     'is_index': is_index
                 }
-        except Exception:
-            pass
-        return None
+                return item, None, 'network'
+            err = {
+                'code': task['code'],
+                'name': task['name'],
+                'date': target_date_str,
+                'period': period,
+                'api': api_name,
+                'reason': '\u63a5\u53e3\u8fd4\u56de\u7a7a',
+                'is_index': is_index,
+                'source': 'network'
+            }
+            return None, err, 'network'
+        except Exception as e:
+            err = {
+                'code': task['code'],
+                'name': task['name'],
+                'date': target_date_str,
+                'period': period,
+                'api': api_name,
+                'reason': str(e),
+                'is_index': is_index,
+                'source': 'network'
+            }
+            return None, err, 'network'
 
     # 并发执行
     # 线程数不宜过多，以免触发反爬限制，10-20左右较为安全
@@ -869,11 +944,17 @@ def fetch_intraday_data_v2(stock_codes, target_date_str, period='1'):
         future_to_task = {executor.submit(_worker_wrapper, t): t for t in tasks}
         
         for future in concurrent.futures.as_completed(future_to_task):
-            res = future.result()
-            if res:
-                results.append(res)
+            item, err, source = future.result()
+            if item:
+                results.append(item)
+                stats['success'] += 1
+            if err:
+                failures.append(err)
+                stats['failed'] += 1
+            if source in stats:
+                stats[source] += 1
             
-    return results
+    return results, failures, stats
 
 # 2. UI 布局
 # -----------------------------------------------------------------------------
@@ -894,44 +975,47 @@ with st.sidebar:
     with st.expander("数据刷新与维护", expanded=True):
         st.write("如果数据显示不正确，请尝试以下操作：")
         
-        # 1. 刷新盘中
+        # 1. ????
         if st.button("🟢 刷新今日行情 (盘中)"):
+            log_action("刷新今日行情(盘中)")
             try:
                 if os.path.exists(CACHE_FILE):
-                    # 读取并删除今天的记录，强制下次加载时触发增量更新
                     _df = pd.read_parquet(CACHE_FILE)
                     _today = datetime.now().date()
-                    # 过滤掉 >= 今天的数据
-                    _df_new = _df[_df['日期'].dt.date < _today]
+                    _df_new = _df[_df["日期"].dt.date < _today]
                     _df_new.to_parquet(CACHE_FILE)
                     st.toast("已清除今日缓存，正在重新拉取实时数据...")
-                st.cache_data.clear() # 即使是分时数据最好也清一下，以防万一
+                st.cache_data.clear()
                 st.rerun()
             except Exception as e:
                 st.error(f"操作失败: {e}")
 
-        # 2. 清理分时缓存（内存）
+        # 2. ??????????
         if st.button("🧹 清空分时图内存缓存"):
+            log_action("清空分时图内存缓存")
             st.cache_data.clear()
             st.toast("✅ 内存缓存已清空，磁盘缓存保留。")
 
-        # 3. 手动刷新名称映射
+        # 3. ????????
         if st.button("🔄 手动更新股票名称"):
             codes_hint = st.session_state.get("last_top_codes", [])
+            log_action("手动更新股票名称", codes=len(codes_hint))
             name_map = _refresh_name_map_for_codes(codes_hint, force=True)
             if name_map:
                 st.toast(f"✅ 已更新名称映射：{len(name_map)} 条")
             else:
                 st.warning("未获取到最新名称映射。")
 
-        # 4. 删除本地分时缓存
+        # 4. ????????
         if st.button("🗑️ 删除本地分时缓存"):
+            log_action("删除本地分时缓存")
             clear_min_cache()
             st.cache_data.clear()
             st.toast("✅ 本地分时缓存已删除。")
 
-        # 5. 彻底重置
+        # 5. ????
         if st.button("🚨 彻底重置 (删除所有)"):
+            log_action("彻底重置")
             if os.path.exists(CACHE_FILE):
                 os.remove(CACHE_FILE)
                 st.toast("已删除历史日线缓存。")
@@ -942,6 +1026,7 @@ with st.sidebar:
     with st.expander("💾 数据备份与恢复", expanded=False):
         st.caption("备份 data 目录（历史日线 + 分时缓存）")
         if st.button("📦 生成备份", key="backup_build"):
+            log_action("生成备份")
             data_bytes = build_data_backup_zip()
             if data_bytes:
                 st.session_state["backup_zip"] = data_bytes
@@ -950,24 +1035,26 @@ with st.sidebar:
             else:
                 st.warning("没有可备份的数据。")
         if "backup_zip" in st.session_state:
-            st.download_button(
+            download_clicked = st.download_button(
                 "⬇️ 下载备份",
                 data=st.session_state["backup_zip"],
                 file_name=st.session_state.get("backup_name", "capmap_data_backup.zip"),
                 mime="application/zip",
                 key="backup_download",
             )
-
+            if download_clicked:
+                log_action("下载备份")
         uploaded = st.file_uploader("恢复备份（.zip）", type=["zip"], key="backup_upload")
         if uploaded is not None and st.button("♻️ 恢复备份", key="backup_restore"):
+            log_action("恢复备份", file=getattr(uploaded, "name", ""))
             try:
                 restored = restore_data_backup(uploaded)
                 st.cache_data.clear()
+                log_action("恢复备份完成", files=restored)
                 st.toast(f"✅ 已恢复 {restored} 个文件")
                 st.rerun()
             except Exception as e:
                 st.error(f"恢复失败: {e}")
-
     st.info("数据源：沪深300成分股 (AkShare)")
     st.caption("注：方块大小使用'成交额'代替'市值'，\n反映当日交易热度。")
 
@@ -975,6 +1062,10 @@ with st.sidebar:
     st.markdown("### 🛠️ 板块过滤")
     filter_cyb = st.checkbox("屏蔽创业板 (300开头)", value=False)
     filter_kcb = st.checkbox("屏蔽科创板 (688开头)", value=False)
+    filter_state = (filter_cyb, filter_kcb)
+    if st.session_state.get("filter_state") != filter_state:
+        st.session_state["filter_state"] = filter_state
+        log_action("筛选条件变更", cyb=filter_cyb, kcb=filter_kcb)
     
 # 加载数据
 with st.spinner("正在初始化历史数据仓库..."):
@@ -994,6 +1085,10 @@ with st.sidebar:
     
     # 导航栏
     nav_option = st.radio("📡 功能导航", ["⏪ 历史盘面回放", "🌊 资金偏离分析"], index=0)
+    prev_nav = st.session_state.get("nav_option_prev")
+    if prev_nav != nav_option:
+        st.session_state["nav_option_prev"] = nav_option
+        log_action("功能导航切换", nav=nav_option)
     
     with st.expander("📥 后台数据预取", expanded=False):
         st.caption("后台静默下载最近 N 天分时数据")
@@ -1004,6 +1099,7 @@ with st.sidebar:
             # 无法通过 Button 停止线程，除非使用 Event。暂不实现停止。
         else:
             if st.button("🚀 启动后台下载"):
+                log_action("启动后台预取", days=prefetch_days)
                 if not origin_df.empty:
                     # 获取日期列表
                     all_dates = sorted(origin_df['日期'].dt.date.unique())
@@ -1252,9 +1348,14 @@ if not origin_df.empty:
         intraday_sig = (playback_mode, chart_mode, int(top_n), dates_sig)
         if st.session_state.get("intraday_sig") != intraday_sig:
             st.session_state["intraday_sig"] = intraday_sig
+            log_action("\u5206\u65f6\u9009\u9879\u53d8\u66f4", playback=playback_mode, chart=chart_mode, top_n=top_n, dates=dates_sig)
             st.session_state["show_intraday"] = False
 
         show_intraday = st.checkbox("加载分时走势 (本地优先，无则网络拉取)", key="show_intraday")
+        prev_show = st.session_state.get("show_intraday_prev", False)
+        if show_intraday and not prev_show:
+            log_action("\u52fe\u9009\u5206\u65f6\u52a0\u8f7d")
+        st.session_state["show_intraday_prev"] = show_intraday
         
         if show_intraday:
             # 使用 placeholder 放置进度条，避免组件销毁导致的索引错乱
@@ -1307,13 +1408,39 @@ if not origin_df.empty:
             status_text = st.empty()
             fetch_progress = st.progress(0)
                  
+            detail_lines = []
+            detail_box = st.empty()
             for i, d_date in enumerate(target_dates_to_fetch):
-                status_text.text(f"🔄 正在获取: {d_date.strftime('%Y-%m-%d')} ({i+1}/{total_steps})...")
+                status_text.text(f"🔄 \u6b63\u5728\u83b7\u53d6: {d_date.strftime('%Y-%m-%d')} | \u5468\u671f={period_to_use}\u5206\u949f | \u76ee\u6807={len(target_stocks_list)}+\u6307\u65703 ({i+1}/{total_steps})")
                 fetch_progress.progress((i + 1) / total_steps)
                 
                 d_str = d_date.strftime("%Y-%m-%d")
-                day_results = fetch_intraday_data_v2(target_stocks_list, d_str, period=period_to_use)
-                
+                day_results, day_failures, day_stats = fetch_intraday_data_v2(target_stocks_list, d_str, period=period_to_use)
+
+                success = day_stats.get('success', 0)
+                failed = day_stats.get('failed', 0)
+                total_req = day_stats.get('total', 0)
+                cache_hits = day_stats.get('cache', 0)
+                network_calls = day_stats.get('network', 0)
+
+                logger.info("\u5206\u65f6\u65e5\u6c47\u603b: date=%s total=%s success=%s failed=%s cache=%s network=%s", d_str, total_req, success, failed, cache_hits, network_calls)
+                if day_failures:
+                    for err in day_failures[:3]:
+                        logger.warning("\u5206\u65f6\u5931\u8d25: code=%s name=%s api=%s reason=%s", err.get('code'), err.get('name'), err.get('api'), err.get('reason'))
+
+                detail_lines.append(f"{d_str} | \u6210\u529f {success}/{total_req} | \u7f13\u5b58 {cache_hits} | \u7f51\u7edc {network_calls} | \u5931\u8d25 {failed}")
+                if failed:
+                    for err in day_failures[:5]:
+                        detail_lines.append(f"  - {err.get('code')} {err.get('name')} \u63a5\u53e3={err.get('api')} \u539f\u56e0={err.get('reason')}")
+                    if failed > 5:
+                        detail_lines.append(f"  - ... \u8fd8\u6709 {failed-5} \u6761\u5931\u8d25")
+
+                if len(detail_lines) > 120:
+                    detail_lines = detail_lines[-120:]
+                detail_box.markdown(
+                    f"""<div style=\"max-height:220px; overflow:auto; border:1px solid #ddd; padding:8px; background:#f8f8f8; white-space:pre-wrap; font-family:monospace; font-size:12px;\">{html.escape('\n'.join(detail_lines))}</div>""",
+                    unsafe_allow_html=True,
+                )
                 for res in day_results:
                         res['data']['date_col'] = d_str
                         res['real_date'] = d_date

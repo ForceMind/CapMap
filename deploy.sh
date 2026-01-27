@@ -244,6 +244,9 @@ baseUrlPath = "$BASE_PATH"
 headless = true
 enableCORS = false
 enableXsrfProtection = false
+
+[browser]
+gatherUsageStats = false
 EOF
 
 cat > "$APP_ROOT/run.sh" <<'EOF'
@@ -261,6 +264,7 @@ mkdir -p "$LOG_DIR"
 
 nohup "$VENV_DIR/bin/streamlit" run "$APP_DIR/app.py" \
   --server.headless true \
+  --browser.gatherUsageStats false \
   > "$LOG_DIR/streamlit.out" 2>&1 &
 echo $! > "$PID_FILE"
 echo "已启动，PID：$(cat "$PID_FILE")"
