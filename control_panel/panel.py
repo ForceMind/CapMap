@@ -2,9 +2,10 @@
 import os
 import time
 import json
+import html
 import subprocess
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 
 APP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 RUN_SCRIPT = os.path.join(APP_ROOT, "run.sh")
@@ -86,6 +87,10 @@ def _html_page(query):
         token_q = f"?token={query['token'][0]}"
     running_text = "运行中" if status["running"] else "未运行"
     pid_text = f"PID: {status['pid']}" if status["running"] else ""
+    msg = ""
+    if query and "msg" in query:
+        msg = query["msg"][0]
+    msg_html = f"<div class=\"msg\">{html.escape(msg)}</div>" if msg else ""
     app_log_text = _tail_log(APP_LOG_FILE, max_lines=200, max_bytes=60000)
     raw_log_text = _tail_log(LOG_FILE, max_lines=120, max_bytes=30000)
 
@@ -97,6 +102,7 @@ def _html_page(query):
   <style>
     body {{ font-family: Arial, sans-serif; padding: 24px; max-width: 900px; margin: 0 auto; }}
     .status {{ padding: 12px; background: #f3f5f7; border-radius: 8px; }}
+    .msg { padding: 10px 12px; margin: 10px 0; background: #fff8e1; border: 1px solid #ffe0b2; border-radius: 6px; color: #6d4c41; }
     .btn {{ padding: 10px 16px; margin-right: 8px; border: none; border-radius: 6px; cursor: pointer; }}
     .start {{ background: #2e7d32; color: #fff; }}
     .stop {{ background: #c62828; color: #fff; }}
@@ -111,6 +117,7 @@ def _html_page(query):
     <div><strong>Streamlit 状态：</strong> {running_text} {pid_text}</div>
     <div><small>提示：请先运行 deploy.sh 生成 run.sh / stop.sh。</small></div>
   </div>
+  {msg_html}
   <p>
     <form method="post" action="/start{token_q}" style="display:inline">
       <button class="btn start" type="submit">启动</button>
@@ -141,6 +148,19 @@ class Handler(BaseHTTPRequestHandler):
             body = body.encode("utf-8")
         self.wfile.write(body)
 
+    def _redirect(self, query, msg=""):
+        parts = []
+        if TOKEN and query and "token" in query:
+            parts.append("token=" + quote(query["token"][0]))
+        if msg:
+            parts.append("msg=" + quote(msg))
+        location = "/"
+        if parts:
+            location += "?" + "&".join(parts)
+        self.send_response(303)
+        self.send_header("Location", location)
+        self.end_headers()
+
     def _auth_or_403(self, query):
         if not _auth_ok(query, self.headers):
             self._send(403, "无权限")
@@ -167,35 +187,35 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/start":
             if not os.path.exists(RUN_SCRIPT):
-                self._send(400, "未找到 run.sh，请先运行 deploy.sh。")
+                self._send(400, "\u672a\u627e\u5230 run.sh\uff0c\u8bf7\u5148\u8fd0\u884c deploy.sh\u3002")
                 return
             if _is_running():
-                self._send(200, "Streamlit 已在运行。")
+                self._redirect(query, "Streamlit \u5df2\u5728\u8fd0\u884c")
                 return
             _run_cmd(["bash", RUN_SCRIPT])
-            self._send(200, "已启动。")
+            self._redirect(query, "\u5df2\u542f\u52a8")
             return
 
         if parsed.path == "/stop":
             if not os.path.exists(STOP_SCRIPT):
-                self._send(400, "未找到 stop.sh，请先运行 deploy.sh。")
+                self._send(400, "\u672a\u627e\u5230 stop.sh\uff0c\u8bf7\u5148\u8fd0\u884c deploy.sh\u3002")
                 return
             if not _is_running():
-                self._send(200, "Streamlit 未运行。")
+                self._redirect(query, "Streamlit \u672a\u8fd0\u884c")
                 return
             _run_cmd(["bash", STOP_SCRIPT])
-            self._send(200, "已停止。")
+            self._redirect(query, "\u5df2\u505c\u6b62")
             return
 
         if parsed.path == "/restart":
             if not os.path.exists(RUN_SCRIPT) or not os.path.exists(STOP_SCRIPT):
-                self._send(400, "未找到 run.sh/stop.sh，请先运行 deploy.sh。")
+                self._send(400, "\u672a\u627e\u5230 run.sh/stop.sh\uff0c\u8bf7\u5148\u8fd0\u884c deploy.sh\u3002")
                 return
             if _is_running():
                 _run_cmd(["bash", STOP_SCRIPT])
                 time.sleep(1)
             _run_cmd(["bash", RUN_SCRIPT])
-            self._send(200, "已重启。")
+            self._redirect(query, "\u5df2\u91cd\u542f")
             return
 
         self._send(404, "未找到")

@@ -1437,8 +1437,9 @@ if not origin_df.empty:
 
                 if len(detail_lines) > 120:
                     detail_lines = detail_lines[-120:]
+                safe_detail = html.escape("\n".join(detail_lines))
                 detail_box.markdown(
-                    f"""<div style=\"max-height:220px; overflow:auto; border:1px solid #ddd; padding:8px; background:#f8f8f8; white-space:pre-wrap; font-family:monospace; font-size:12px;\">{html.escape('\n'.join(detail_lines))}</div>""",
+                    f"""<div style=\"max-height:220px; overflow:auto; border:1px solid #ddd; padding:8px; background:#f8f8f8; white-space:pre-wrap; font-family:monospace; font-size:12px;\">{safe_detail}</div>""",
                     unsafe_allow_html=True,
                 )
                 for res in day_results:
