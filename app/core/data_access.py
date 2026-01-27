@@ -213,9 +213,9 @@ def _get_cached_codes_for_date(date_key, codes, period=DEFAULT_MIN_PERIOD, is_in
 
 def _serial_fetch_intraday(date_str, codes, name_map, include_indices=True, delay_sec=10, retry_sleep_sec=300, max_retries=3, job_tag="manual"):
     indices_map = {
-        "000300": "\ud83d\udcca \u6caa\u6df1300",
-        "000001": "\ud83d\udcc8 \u4e0a\u8bc1\u6307\u6570",
-        "399001": "\ud83d\udcc9 \u6df1\u8bc1\u6210\u6307",
+        "000300": "\u6caa\u6df1300",
+        "000001": "\u4e0a\u8bc1\u6307\u6570",
+        "399001": "\u6df1\u8bc1\u6210\u6307",
     }
     tasks = []
     if include_indices:
@@ -796,6 +796,7 @@ def fetch_history_data():
                     except Exception as e:
                         logger.warning("??????: code=%s err=%s", code, e)
             return None
+        ctx = get_script_run_ctx()
         def fetch_one_stock_wrapper(code, name):
             if ctx:
                 add_script_run_ctx(threading.current_thread(), ctx)
