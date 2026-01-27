@@ -156,17 +156,18 @@ def fetch_biying_stock_list(licence):
     df = pd.DataFrame(rows)
     code_col = None
     name_col = None
-    for c in ("code", "symbol", "ts_code", "证券代码", "代码"):
+    for c in ("dm", "code", "symbol", "ts_code", "证券代码", "代码"):
         if c in df.columns:
             code_col = c
             break
-    for c in ("name", "名称", "证券简称", "股票名称"):
+    for c in ("mc", "name", "名称", "证券简称", "股票名称"):
         if c in df.columns:
             name_col = c
             break
     if not code_col or not name_col:
         return {}
-    df[code_col] = df[code_col].astype(str)
+    df[code_col] = df[code_col].astype(str).str.strip()
+    df[code_col] = df[code_col].str.replace(r"\\..*$", "", regex=True)
     df[name_col] = df[name_col].astype(str)
     return dict(zip(df[code_col], df[name_col]))
 
@@ -185,6 +186,25 @@ def _fetch_biying_history_raw(symbol, start_date, end_date, period, licence, is_
     url = _build_biying_url(path, params={"st": start_key, "et": end_key})
     payload = _fetch_biying_json(url)
     return _extract_biying_rows(payload)
+
+
+def _parse_biying_time(value):
+    if value is None:
+        return pd.NaT
+    if isinstance(value, (int, float)):
+        ts = int(value)
+        if ts > 10**12:
+            return pd.to_datetime(ts, unit="ms", errors="coerce")
+        if ts > 10**9:
+            return pd.to_datetime(ts, unit="s", errors="coerce")
+    text = str(value).strip()
+    if text.isdigit():
+        ts = int(text)
+        if ts > 10**12:
+            return pd.to_datetime(ts, unit="ms", errors="coerce")
+        if ts > 10**9:
+            return pd.to_datetime(ts, unit="s", errors="coerce")
+    return pd.to_datetime(text, errors="coerce")
 
 
 def fetch_biying_intraday(symbol, date_str, period, licence, is_index=False):
@@ -219,7 +239,7 @@ def fetch_biying_intraday(symbol, date_str, period, licence, is_index=False):
             break
     if not time_col or not close_col:
         return None
-    df["time"] = pd.to_datetime(df[time_col])
+    df["time"] = df[time_col].apply(_parse_biying_time)
     df["close"] = pd.to_numeric(df[close_col], errors="coerce")
     if open_col and open_col in df.columns:
         base = pd.to_numeric(df[open_col], errors="coerce").iloc[0]
@@ -268,7 +288,7 @@ def fetch_biying_daily(symbol, start_date, end_date, licence, is_index=False, pe
             break
     if not date_col or not close_col:
         return None
-    df["日期"] = pd.to_datetime(df[date_col])
+    df["日期"] = df[date_col].apply(_parse_biying_time)
     df["收盘"] = pd.to_numeric(df[close_col], errors="coerce")
     if amount_col:
         df["成交额"] = pd.to_numeric(df[amount_col], errors="coerce")
