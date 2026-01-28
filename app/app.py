@@ -104,15 +104,28 @@ with st.sidebar:
             st.cache_data.clear()
             st.toast("✅ 内存缓存已清空，磁盘缓存保留。")
 
-        # 3. ????????
-        if st.button("🔄 手动更新股票名称"):
+        # 3. 手动强制更新股票名称
+        if st.button("🔄 强制刷新股票名称"):
             codes_hint = st.session_state.get("last_top_codes", [])
             log_action("手动更新股票名称", codes=len(codes_hint))
-            name_map = _refresh_name_map_for_codes(codes_hint, force=True)
+            
+            # 删除旧映射文件，强制重建
+            for f in ["data/name_map.json", "data/name_refresh.json"]:
+                if os.path.exists(f):
+                    try:
+                        os.remove(f)
+                    except:
+                        pass
+                        
+            with st.spinner("正在从网络重新拉取股票名称列表..."):
+                name_map = _refresh_name_map_for_codes(codes_hint, force=True)
+                
             if name_map:
-                st.toast(f"✅ 已更新名称映射：{len(name_map)} 条")
+                st.success(f"✅ 已更新名称映射：{len(name_map)} 条 (请刷新页面)")
+                time.sleep(1)
+                st.rerun()
             else:
-                st.warning("未获取到最新名称映射。")
+                st.warning("⚠️ 未能获取到名称映射，请检查网络或接口许可。")
 
         # 4. ????????
         if st.button("🗑️ 删除本地分时缓存"):

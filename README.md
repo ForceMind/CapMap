@@ -83,3 +83,6 @@ PANEL_TOKEN=your_token control_panel/run_panel.sh
 control_panel/stop_panel.sh
 ```
 控制台日志：`logs/panel.out`
+
+
+streamlit run app/app.py

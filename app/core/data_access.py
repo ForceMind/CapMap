@@ -541,9 +541,10 @@ def _fetch_name_for_code(code):
         if licence:
              # Biying API: /hscp/gsjj/{code} -> 返回包括股票名称的信息
              info = fetch_biying_stock_info(code, licence)
-             # 可能的返回: {'dm': '600000', 'mc': '浦发银行', ...}
+             # 可能的返回: {'dm': '600000', 'mc': '浦发银行', 'jc': '浦发银行'}
              if info and isinstance(info, dict):
-                 name = info.get("mc") or info.get("name") or info.get("名称")
+                 # 优先使用 'jc' (简称), 'short_name', 然后才是 'mc' (名称/全称)
+                 name = info.get("jc") or info.get("简称") or info.get("short_name") or info.get("mc") or info.get("name") or info.get("名称")
                  if name:
                      return name
     except Exception as e:

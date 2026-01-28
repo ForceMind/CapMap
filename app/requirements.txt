@@ -4,3 +4,4 @@ plotly
 akshare
 pypinyin
 pyarrow
+Jinja2

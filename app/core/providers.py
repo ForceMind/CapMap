@@ -234,7 +234,8 @@ def fetch_biying_stock_list(licence):
         if c in df.columns:
             code_col = c
             break
-    for c in ("mc", "name", "名称", "证券简称", "股票名称"):
+    # 优先找简称 (jc)，其次才是 mc (名称)
+    for c in ("jc", "简称", "name", "mc", "名称", "证券简称", "股票名称"):
         if c in df.columns:
             name_col = c
             break
