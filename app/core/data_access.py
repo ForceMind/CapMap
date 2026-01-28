@@ -60,13 +60,16 @@ def get_all_stocks_list(force_update=False):
     # Fetch from AkShare
     try:
         # 使用 st.spinner 如果在 streamlit 环境下
-        # 但 data_access 可能是后台运行，尽量用 logging
+        status_msg = st.empty()
+        status_msg.info("⏳ 正在从 AkShare 同步全市场股票列表，请稍候...")
         logging.info("Fetching all stocks from AkShare...")
+        
         df = ak.stock_zh_a_spot_em()
         # akshare 返回: 序号, 代码, 名称, 最新价, ...
         # 我们只要 代码, 名称
         df = df[['代码', '名称']].rename(columns={'代码': 'code', '名称': 'name'})
         
+        status_msg.info("⏳ 正在生成拼音索引...")
         # Generate Pinyin
         def get_pinyin_first_letters(text):
             try:
@@ -81,11 +84,21 @@ def get_all_stocks_list(force_update=False):
         if not os.path.exists("data"):
             os.makedirs("data")
         df.to_csv(ALL_STOCKS_CACHE_FILE, index=False)
+        
+        status_msg.success(f"✅ 股票列表已更新 (共 {len(df)} 只)")
+        time.sleep(1) # Show success for a second
+        status_msg.empty()
+        
         return df
     except Exception as e:
-        logging.error(f"Error fetching stocks from AkShare: {e}")
+        err_msg = f"Error fetching stocks from AkShare: {e}"
+        logging.error(err_msg)
+        if 'status_msg' in locals():
+            status_msg.error(f"❌ 同步失败: {e}")
+        
         # 如果下载失败，尝试读取旧缓存即使过期
         if os.path.exists(ALL_STOCKS_CACHE_FILE):
+             st.toast("⚠️ 使用过期缓存列表")
              return pd.read_csv(ALL_STOCKS_CACHE_FILE, dtype={'code': str})
         return pd.DataFrame(columns=['code', 'name', 'pinyin'])
 
@@ -830,7 +843,8 @@ def fetch_history_data():
             cached_df = pd.read_parquet(CACHE_FILE)
             if not cached_df.empty:
                 last_cached_date = cached_df['日期'].max().date()
-                st.toast(f"✅ 已加载本地缓存，最新日期: {last_cached_date}")
+                # 区分提示，避免误导用户以为个股分时数据也加载完了
+                st.toast(f"✅ 日线行情已就绪: {last_cached_date}")
         except Exception as e:
             st.error(f"读取缓存文件失败: {e}")
 
