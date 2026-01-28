@@ -400,6 +400,18 @@ def fetch_biying_index_cons(index_code, licence):
 def _fetch_biying_history_raw(symbol, start_date, end_date, period, licence, is_index=False, adj="n"):
     if not licence:
         return []
+    
+    # Map Params to Biying API format
+    # Period: daily -> d
+    # Adjust: qfq -> f, hfq -> b
+    if period == "daily" or period == "1day":
+        period = "d"
+    
+    if adj == "qfq":
+        adj = "f"
+    elif adj == "hfq":
+        adj = "b"
+        
     market = _biying_market(symbol, is_index=is_index)
     start_key = _normalize_yyyymmdd(start_date)
     end_key = _normalize_yyyymmdd(end_date)

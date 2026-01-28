@@ -943,21 +943,25 @@ def fetch_history_data(index_pool="000300"):
             except Exception as e:
                 logger.warning(f"Biying index cons err: {e}")
 
-        # 2. AkShare Fallback (If Biying failed or empty)
+        # 2. AkShare Fallback (Removed as requested)
         if not cons_codes:
-            msg = f"正在尝试从 AkShare 获取 {pool_desc} 成分股..."
+            msg = f"正在尝试从缓存获取 {pool_desc} 成分股..."
             if licence: msg += " (Biying获取为空)"
             st.write(msg)
             
-            try:
-                # AkShare 接口: index_stock_cons
-                cons_df = ak.index_stock_cons(symbol=index_pool)
-                cons_codes = cons_df['variety'].tolist()
-            except Exception as e:
-                logger.warning(f"AkShare index cons failed: {e}")
+            # Try to infer index cons from existing huge stock list if possible, or just fail cleanly
+            # Or better: check cache for ANY historical data and just assume those are the cons for now
+            if not cached_df.empty:
+                cons_codes = cached_df['代码'].unique().tolist()
+                st.info(f"使用本地缓存中的 {len(cons_codes)} 只股票作为成分股")
+            
         
         # 3. Last resort fallback / check
         if not cons_codes:
+             if not cached_df.empty:
+                 status_text.warning("无法更新成分股列表，但已加载历史缓存。")
+                 return _refresh_cached_names(cached_df)
+
              st.error(f"❌ 无法获取 {pool_desc} 成分股列表，请检查网络或配置。")
              return _refresh_cached_names(cached_df)
 
@@ -1010,8 +1014,8 @@ def fetch_history_data(index_pool="000300"):
                 except Exception as e:
                     pass # Try next provider
             
-            # 2. AkShare fallback removed as requested.
-            # If Biying fails, we return None.
+            # 2. AkShare Fallback (Removed as requested)
+            pass
             return None
 
         # Execute
