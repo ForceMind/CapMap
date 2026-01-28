@@ -816,21 +816,27 @@ def fetch_history_data():
             status_text.text(f"正在检查增量数据 ({start_date_str} - {end_date_str})...")
 
         # 获取成分股列表
-        try:
-            logger.info("AKShare 获取成分股列表: 000300")
-            cons_df = ak.index_stock_cons(symbol="000300")
-            if cons_df is not None:
-                logger.info("成分股列表获取成功: rows=%s", len(cons_df))
-        except:
-            if not cached_df.empty:
-                logger.warning("成分股列表获取失败，使用缓存")
-                st.warning("成分股列表获取失败，使用缓存数据")
-                return _refresh_cached_names(cached_df)
-            return pd.DataFrame()
+        cons_df = None
+        for attempt in range(3):
+            try:
+                logger.info(f"AKShare 获取成分股列表: 000300 (尝试 {attempt+1}/3)")
+                cons_df = ak.index_stock_cons(symbol="000300")
+                if cons_df is not None and not cons_df.empty:
+                    logger.info("成分股列表获取成功: rows=%s", len(cons_df))
+                    break
+            except Exception as e:
+                logger.warning(f"成分股列表获取失败 (attempt {attempt+1}): {e}")
+                time.sleep(2)
         
         if cons_df is None or cons_df.empty:
-            logger.warning("成分股列表为空，使用缓存")
-            return _refresh_cached_names(cached_df) if not cached_df.empty else pd.DataFrame()
+            if not cached_df.empty:
+                logger.warning("成分股列表完全获取失败，降级使用缓存中的现有代码")
+                st.warning("⚠️ 无法连接到交易所获取最新成分股，仅使用本地缓存中的现有股票。")
+                return _refresh_cached_names(cached_df)
+            else:
+                logger.error("成分股列表获取失败且无本地缓存，无法初始化。")
+                st.error("❌ 初始化失败：无法获取沪深300成分股列表。请检查网络连接或稍后重试。")
+                return pd.DataFrame()
 
         if 'variety' in cons_df.columns:
             code_col, name_col = 'variety', 'name'

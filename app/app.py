@@ -235,3 +235,16 @@ if not origin_df.empty:
 
     elif nav_option == NAV_DIVERGENCE:
         render_divergence_view(df, available_dates)
+
+else:
+    st.warning("⚠️ 未获取到任何历史数据。可能原因：")
+    st.markdown("""
+    1. **网络连接问题**：无法连接到 AkShare 或 必盈 API。
+    2. **接口限制**：数据源接口可能暂时不可用。
+    3. **初始化中断**：如果是首次运行，请检查控制台日志是否有报错。
+    """)
+    if st.button("🔄 重试全量初始化"):
+        st.cache_data.clear()
+        if os.path.exists("data/csi300_history_cache.parquet"):
+            os.remove("data/csi300_history_cache.parquet")
+        st.rerun()
