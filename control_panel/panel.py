@@ -344,8 +344,8 @@ class Handler(BaseHTTPRequestHandler):
         if is_ajax:
             self._json_resp({"success": success, "msg": msg}, code=200 if success else 400)
         else:
-            # Fallback for non-JS clients (optional)
-            self._redirect(query, msg)
+            # Always return JSON for POST to avoid browser navigation issues
+            self._json_resp({"success": success, "msg": msg}, code=200 if success else 400)
 
 
 def main():

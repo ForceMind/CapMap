@@ -123,14 +123,22 @@ def get_biying_licence(cfg=None):
     return ""
 
 
-def _normalize_yyyymmdd(value):
+def _normalize_time_param(value):
+    """
+    Format time parameter for Biying API.
+    Supports YYYYMMDD or YYYYMMDDHHMMSS.
+    """
     if value is None:
         return ""
     try:
         dt = pd.to_datetime(value)
-        return dt.strftime("%Y%m%d")
+        # Check if we have non-zero time component
+        if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
+             return dt.strftime("%Y%m%d")
+        else:
+             return dt.strftime("%Y%m%d%H%M%S")
     except Exception:
-        text = str(value).replace("-", "")
+        text = str(value).replace("-", "").replace(":", "").replace(" ", "")
         return text
 
 
@@ -160,34 +168,30 @@ def _fetch_biying_json(url, timeout=20):
         LOGGER.warning(f"Biying daily quota reached ({count}/{BIYING_DAILY_LIMIT}). Switching to fallback.")
         return None
 
-    LOGGER.info(f"Biying REQ: {url}") # Log Request
-
     retries = 3
     for i in range(retries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "capmap/1.0"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                status_code = resp.getcode()
                 payload = resp.read()
-                LOGGER.info(f"Biying RES: Status={status_code} Size={len(payload)}B URL={url}") # Log Response
-
             try:
                 return json.loads(payload.decode("utf-8"))
             except Exception:
                 try:
                     return json.loads(payload)
                 except Exception:
-                    LOGGER.error(f"Biying JSON Parse Error. Payload[:50]: {payload[:50]}")
+                    # JSON parse error (suppress payload logging for privacy)
                     return None
         except urllib.error.HTTPError as e:
-            LOGGER.error(f"Biying RES: HTTP {e.code} {e.reason} for {url}")
             if e.code == 429:
                 LOGGER.warning(f"Biying API 429 Limit reached, retrying {i+1}/{retries} after sleep...")
                 time.sleep(2 * (i + 1))
                 continue
+            # Log error code but avoid full URL which may contain licence
+            LOGGER.warning(f"Biying API HTTP Error {e.code}: {e.reason}")
             return None
         except Exception as e:
-            LOGGER.error(f"Biying RES: Network/Other Error: {type(e).__name__}: {e} for URL: {url}")
+            LOGGER.warning(f"Biying API request failed: {e}")
             return None
     return None
 
@@ -410,17 +414,24 @@ def _fetch_biying_history_raw(symbol, start_date, end_date, period, licence, is_
     # Map Params to Biying API format
     # Period: daily -> d
     # Adjust: qfq -> f, hfq -> b
-    if period == "daily" or period == "1day":
+    periods_str = str(period).lower()
+    if periods_str in ["daily", "1day"]:
         period = "d"
     
-    if adj == "qfq":
-        adj = "f"
-    elif adj == "hfq":
-        adj = "b"
+    # Force adj='n' for minute level data (5, 15, 30, 60)
+    # Biying Doc: "Minute level without adjustment data, corresponding parameter is n"
+    if str(period) in ["1", "5", "15", "30", "60"]:
+        adj = "n"
+    else:
+        # Only map adjust for non-minute periods
+        if adj == "qfq":
+            adj = "f"
+        elif adj == "hfq":
+            adj = "b"
         
     market = _biying_market(symbol, is_index=is_index)
-    start_key = _normalize_yyyymmdd(start_date)
-    end_key = _normalize_yyyymmdd(end_date)
+    start_key = _normalize_time_param(start_date)
+    end_key = _normalize_time_param(end_date)
     code = f"{symbol}.{market}"
     if is_index:
         path = f"/hsindex/history/{code}/{period}/{licence}"
