@@ -106,7 +106,10 @@ def render_market_overview(df):
         st.caption("腾落线 (Advance-Decline Line)：反映市场内部上涨力量的累积。指数上涨但ADL下降，预示背离风险。")
         fig_adl = px.line(breadth_df, x='date', y='adl', title="全市场腾落线 (ADL)")
         fig_adl.update_layout(xaxis_title="", yaxis_title="ADL 值")
-        st.plotly_chart(fig_adl, use_container_width=True)
+        try:
+            st.plotly_chart(fig_adl, width="stretch")
+        except TypeError:
+            st.plotly_chart(fig_adl, use_container_width=True)
         
     with tab2:
         # 堆叠柱状图显示上涨/下跌/平盘
@@ -116,7 +119,10 @@ def render_market_overview(df):
         fig_count.add_trace(go.Bar(x=breadth_df['date'], y=-breadth_df['down'], name='下跌', marker_color='#00aa30')) # 下跌用负数显示在下方
         
         fig_count.update_layout(barmode='relative', title="每日涨跌家数分布 (红涨绿跌)", xaxis_title="", yaxis_title="家数")
-        st.plotly_chart(fig_count, use_container_width=True)
+        try:
+            st.plotly_chart(fig_count, width="stretch")
+        except TypeError:
+            st.plotly_chart(fig_count, use_container_width=True)
 
     # 4. 赚钱效应 (平均/中位数涨跌幅)
     st.markdown("### 💰 赚钱效应 (平均 vs 中位数)")
@@ -130,5 +136,8 @@ def render_market_overview(df):
     fig_effect.add_hline(y=0, line_dash="dash", line_color="gray")
     
     fig_effect.update_layout(title="市场平均 vs 中位数涨跌幅趋势", xaxis_title="", yaxis_title="涨跌幅 (%)")
-    st.plotly_chart(fig_effect, use_container_width=True)
+    try:
+        st.plotly_chart(fig_effect, width="stretch")
+    except TypeError:
+        st.plotly_chart(fig_effect, use_container_width=True)
 

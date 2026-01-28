@@ -148,7 +148,12 @@ def render_stock_analysis_view(origin_df):
     with col4:
         st.write("") # Spacer
         st.write("")
-        do_search = st.button("📊 生成图表", type="primary", use_container_width=True)
+        # do_search = st.button("📊 生成图表", type="primary", use_container_width=True)
+        # 2026 Update: use_container_width=True -> width="stretch"
+        try:
+             do_search = st.button("📊 生成图表", type="primary", width="stretch")
+        except TypeError:
+             do_search = st.button("📊 生成图表", type="primary", use_container_width=True)
 
     # --- 2. 主逻辑 ---
     if selected_code:
@@ -192,7 +197,10 @@ def render_stock_analysis_view(origin_df):
                     height=400,
                     margin=dict(l=20, r=20, t=40, b=20)
                 )
-                st.plotly_chart(fig_daily, use_container_width=True)
+                try:
+                    st.plotly_chart(fig_daily, width="stretch")
+                except TypeError:
+                    st.plotly_chart(fig_daily, use_container_width=True)
                 
                 # ATR 指标卡
                 last_row = stock_daily_df.iloc[-1]
@@ -408,5 +416,8 @@ def render_stock_analysis_view(origin_df):
             fig.update_yaxes(title_text="指数", row=1, col=1, secondary_y=True, showgrid=False) # 右轴不显示 grid，免得乱
             fig.update_yaxes(title_text="成交量", row=2, col=1)
 
-            st.plotly_chart(fig, use_container_width=True)
+            try:
+                st.plotly_chart(fig, width="stretch")
+            except TypeError:
+                st.plotly_chart(fig, use_container_width=True)
 
