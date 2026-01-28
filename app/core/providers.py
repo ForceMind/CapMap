@@ -238,6 +238,36 @@ def fetch_biying_stock_list(licence):
 
 
 def fetch_biying_index_cons(index_code, licence):
+    """获取指数成分股列表
+    
+    API Doc: /hszg/gg/{code}/{licence}
+    Ref: https://www.biyingapi.com/doc_hs
+    Need to map standard index code to 'concept tree' code.
+    Samples:
+      000300 -> hs300
+      000905 -> zhishu_000905
+      399001 -> zhishu_399001
+      000016 -> zhishu_000016 (Sz50)
+      000688 -> zhishu_000688 (KC50)
+    """
+    if not licence:
+        return []
+        
+    # Standardize input code (remove sh/sz prefix)
+    raw_code = str(index_code).lower().replace("sh", "").replace("sz", "").split(".")[0]
+    
+    # Mapping logic
+    if raw_code == "000300":
+        target_code = "hs300"
+    else:
+        # Default pattern seems to be zhishu_{code}
+        target_code = f"zhishu_{raw_code}"
+
+    # Try specific codes first, then generic
+    candidates = [target_code]
+    # In case 399001 was passed as sz399001
+    
+def fetch_biying_index_cons(index_code, licence):
     """获取指数成分股列表"""
     if not licence:
         return []
@@ -245,37 +275,54 @@ def fetch_biying_index_cons(index_code, licence):
     # 清理代码
     raw_code = str(index_code).split(".")[0]
     
-    # 尝试多个路径和代码格式 (000905 or sh000905)
-    candidates = [raw_code]
-    if raw_code == "000300": candidates.append("sh000300")
-    if raw_code == "000905": candidates.append("sh000905")
-    if raw_code == "000852": candidates.append("sh000852")
+    # 映射表: 常用指数 -> Biying 内部代码
+    # 000300 -> hs300
+    # 000905 -> zhishu_000905
+    # 000852 -> zhishu_000852
+    candidates = []
 
-    paths_templates = [
-        "/zscons/{code}/{licence}",       # 标准
-        "/hsindex/cons/{code}/{licence}", # 历史
-        "/zs/cons/{code}/{licence}"
-    ]
+    if raw_code == "000300":
+        candidates.append("hs300")
+    elif raw_code == "399001":
+        candidates.append("zhishu_399001")
+    elif raw_code == "000001":
+        candidates.append("zhishu_000001")
+    else:
+        # 默认尝试 zhishu_ 前缀
+        candidates.append(f"zhishu_{raw_code}")
 
+    # 兜底：尝试原始代码 (某些旧接口可能还活着)
+    candidates.append(raw_code)
+
+    # 路径：/hszg/gg/{code}/{licence}
+    path_template = "/hszg/gg/{code}/{licence}"
+    
     rows = []
+    
     for c in candidates:
-        for tpl in paths_templates:
-            try:
-                path = tpl.format(code=c, licence=urllib.parse.quote(licence))
-                url = _build_biying_url(path)
-                payload = _fetch_biying_json(url)
-                rows_got = _extract_biying_rows(payload)
-                if rows_got:
-                    rows = rows_got
-                    break
-            except Exception:
-                pass
-        if rows: break
+        try:
+            path = path_template.format(code=c, licence=urllib.parse.quote(licence))
+            url = _build_biying_url(path)
+            payload = _fetch_biying_json(url)
+            rows = _extract_biying_rows(payload)
+            if rows:
+                break
+        except Exception:
+            pass
 
-    # 解析 rows (通常包含 code/symbol, name 等)
+    # 如果还为空，尝试旧接口路径 (万一)
+    if not rows:
+         try:
+            # 尝试 /zscons/
+            url = _build_biying_url(f"/zscons/{raw_code}/{urllib.parse.quote(licence)}")
+            payload = _fetch_biying_json(url)
+            rows = _extract_biying_rows(payload)
+         except Exception:
+            pass
+
     cons = []
     for row in rows:
-        # 寻找代码字段
+        # 寻找代码字段 (Biying 通常返回 'dm')
         code = None
         for k in ["dm", "code", "symbol", "ts_code"]:
             if k in row:
@@ -286,7 +333,12 @@ def fetch_biying_index_cons(index_code, licence):
             if "." in code:
                 code = code.split(".")[0]
             cons.append(code)
+            
+    if cons:
+        LOGGER.info(f"Biying Index Cons success: {raw_code} -> {len(cons)} stocks")
+        
     return cons
+
 
 
 
