@@ -530,7 +530,7 @@ def render_history_view(df, available_dates):
                                 x=df_p['x_int'],
                                 y=df_p['cumulative_pct'],
                                 mode='lines',
-                                name=s['name'],
+                                name=s['name'], # Use name directly instead of code for legend
                                 # line=dict(width=width, color=color),
                                 # 个股线宽不需要太粗，颜色要清晰
                                 line=dict(width=max(1.5, width), color=color),

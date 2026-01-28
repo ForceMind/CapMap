@@ -1012,10 +1012,18 @@ def fetch_history_data(index_pool="000300"):
                                     if col not in _df.columns: _df[col] = 0.0
                                 return _df[['日期', '收盘', '涨跌幅', '成交额', '代码']]
                 except Exception as e:
-                    pass # Try next provider
+                    logger.debug(f"Biying daily fetch worker error {code}: {e}")
             
-            # 2. AkShare Fallback (Removed as requested)
-            pass
+            # 2. AkShare Fallback (RESTORED)
+            try:
+                # 只有当 Biying 没有 Licence 或者 失败时才走这里
+                d = ak.stock_zh_a_hist(symbol=code, start_date=start_date_str, end_date=end_date_str, adjust="qfq")
+                if d is not None and not d.empty:
+                     d = d.rename(columns={'日期': '日期', '收盘': '收盘', '涨跌幅': '涨跌幅', '成交额': '成交额'})
+                     return d[['日期', '收盘', '涨跌幅', '成交额']].assign(代码=code)
+            except Exception as e:
+                logger.debug(f"AkShare daily fetch worker error {code}: {e}")
+
             return None
 
         # Execute

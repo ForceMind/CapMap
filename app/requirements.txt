@@ -3,3 +3,4 @@ pandas
 plotly
 akshare
 pypinyin
+pyarrow
