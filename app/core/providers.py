@@ -15,7 +15,7 @@ PROVIDER_CONFIG_FILE = "data/provider_config.json"
 DEFAULT_PROVIDER_ORDER = ["biying", "akshare"]
 BIYING_BASE_URL = os.environ.get("BIYING_BASE_URL", "https://api.biyingapi.com")
 BIYING_QUOTA_FILE = "data/biying_quota.json"
-BIYING_DAILY_LIMIT = 200
+BIYING_DAILY_LIMIT = 99999999999
 
 def _check_and_consume_quota():
     try:
