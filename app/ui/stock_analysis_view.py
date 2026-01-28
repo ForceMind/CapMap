@@ -16,10 +16,8 @@ def render_stock_analysis_view(origin_df):
     col1, col2, col3, col4 = st.columns([1.5, 1.5, 1, 1.5])
     
     with col1:
-        # 1. 输入股票代码（支持手动输入没缓存的）
-        user_input_code = st.text_input("股票代码 (可选)", placeholder="例如: 600519", help="如果下拉列表里没有，在此输入")
-        
-        # 2. 下拉列表 (来自缓存的历史数据)
+        # 1. 自动补全搜索框 (Combo box)
+        # 获取缓存中的热门列表
         all_codes = sorted(origin_df['代码'].unique())
         code_name_map = {}
         unique_stocks = origin_df.drop_duplicates(subset=['代码'])[['代码', '名称']]
@@ -29,30 +27,50 @@ def render_stock_analysis_view(origin_df):
         # 默认列表
         options_list = [code_name_map[c] for c in all_codes]
         
-        # 如果手动输入了有效代码，优先使用
+        # 使用 selectbox 实现搜索 (Streamlit 原生支持输入筛选)
+        # 但如果用户想要输入不在列表里的代码，selectbox 默认不支持 custom input
+        # 变通方案：在 options 列表头部提供一个 "Custom Input..." 提示，
+        # 或者教导用户如果搜不到，就去下面的 text_input 输入。
+        # 更好的方案：既然有API，我们可以允许用户直接通过 text_input 覆盖。
+        
+        # 统一为一个控件：Selectbox with input functionality is hard in plain Streamlit.
+        # We will keep the select box for cached stocks, and a small expander or just text input for "Others".
+        
+        # 但是用户说 "Input stock in ONE place, fuzzy search supported, call API to query"
+        # 意味着如果 selectbox 搜不到，应该能 fallback 到 API 查询。
+        # 这里用一个简单的模式：如果用户在 selectbox 没找到，可以选 "手动输入"，然后弹出 text input。
+        
+        # 实际上 Streamlit selectbox 已经很好用了。只有当 origin_df 缺少该票时才需要手动。
+        # 增加一个 "🔍 搜索/输入代码"
+        
+        search_input = st.text_input("🔍 搜索/输入股票代码", placeholder="输入代码(如000001) 或 名称", help="支持模糊搜索")
+        
         selected_code = None
         selected_name = "未命名"
         
-        selected_dropdown = st.selectbox(
-            "选择缓存内股票", 
-            options=options_list,
-            index=0
-        )
-
-        if user_input_code and len(user_input_code.strip()) >= 6:
-            selected_code = user_input_code.strip()
-            # 尝试在 map 里找名字，找不到就用代码
-            # (简化的逻辑，如果需要实时查名需要调API，这里先略过)
-            found_name = None
-            for c, n_str in code_name_map.items():
-                if c == selected_code:
-                     found_name = n_str.split(" | ")[1]
-                     break
-            selected_name = found_name if found_name else selected_code
-            st.caption(f"使用手动输入代码: {selected_code}")
+        # 逻辑：如果 search input 有值，优先尝试匹配 manual input or filter list
+        if search_input:
+            search_str = search_input.strip()
+            # 1. 尝试在现有缓存中模糊匹配
+            matched = [opt for opt in options_list if search_str in opt]
+            if matched:
+                # 如果有匹配，显示匹配列表供选择
+                selected_display = st.selectbox("请选择匹配结果", options=matched, index=0)
+                selected_code = selected_display.split(" | ")[0]
+                selected_name = selected_display.split(" | ")[1]
+            else:
+                # 2. 没匹配到，假设是新代码，直接使用 search_str 作为 code (如果是数字)
+                if search_str.isdigit() and len(search_str) == 6:
+                    selected_code = search_str
+                    selected_name = f"未知 ({selected_code})"
+                    st.caption("⚠️ 本地缓存未找到，尝试直接拉取数据...")
+                else:
+                    st.warning("未找到匹配股票，请输入准确的6位代码。")
         else:
-            selected_code = selected_dropdown.split(" | ")[0]
-            selected_name = selected_dropdown.split(" | ")[1]
+             # 没输入，显示默认热门/全部列表
+            selected_display = st.selectbox("选择或搜索缓存股票", options=options_list, index=0)
+            selected_code = selected_display.split(" | ")[0]
+            selected_name = selected_display.split(" | ")[1]
 
     with col2:
         # 日期范围选择
@@ -169,6 +187,7 @@ def render_stock_analysis_view(origin_df):
 
             progress_bar.empty()
 
+
             if not stock_data_list:
                 st.error("未找到所选股票的分钟数据，请检查缓存或尝试预取。")
                 return
@@ -177,76 +196,108 @@ def render_stock_analysis_view(origin_df):
             df_full_stock = pd.concat(stock_data_list).sort_values('time').reset_index(drop=True)
             df_full_index = pd.concat(index_data_list).sort_values('time').reset_index(drop=True) if index_data_list else pd.DataFrame()
 
+            # --- 数据对齐与时间格式化 (关键步骤：解决Gap问题) ---
+            # 为了完美去除空隙，我们将使用 category 轴，这要求 x 轴必须是字符串且完全对齐。
+            # 1. 以个股数据为主轴
+            # 2. 将指数数据 merge 进来
+            
+            # 确保 time 是 datetime
+            df_full_stock['time'] = pd.to_datetime(df_full_stock['time'])
+            if not df_full_index.empty:
+                df_full_index['time'] = pd.to_datetime(df_full_index['time'])
+                # 重命名指数列以免冲突
+                df_full_index = df_full_index[['time', 'close']].rename(columns={'close': 'close_index'})
+                # Merge: left join，保证以个股时间为准
+                df_merged = pd.merge(df_full_stock, df_full_index, on='time', how='left')
+            else:
+                df_merged = df_full_stock.copy()
+                df_merged['close_index'] = np.nan
+
+            # 生成字符串时间轴，用于 Category Mapping
+            # 格式：MM-DD HH:MM
+            df_merged['time_str'] = df_merged['time'].dt.strftime('%m-%d %H:%M')
+
             # --- 3. 绘图 ---
-            # 创建子图: Row 1 = K线/价格, Row 2 = 成交量
+            # 创建子图: Row 1 = K线/价格 + 指数, Row 2 = 成交量
             fig = make_subplots(
                 rows=2, cols=1, 
                 shared_xaxes=True, 
-                vertical_spacing=0.05,
+                vertical_spacing=0.03, # 减小间距
                 row_heights=[0.7, 0.3],
                 specs=[[{"secondary_y": True}], [{"secondary_y": False}]]
             )
 
-            # A. 个股 K线 (如果数据够细，或者直接画收盘线)
-            # 在多日分钟图里，K线可能会太密，我们画线图，或者允许缩放
-            # 如果是 Candlestick
+            # A. 个股 K线
             fig.add_trace(go.Candlestick(
-                x=df_full_stock['time'],
-                open=df_full_stock['open'],
-                high=df_full_stock['high'],
-                low=df_full_stock['low'],
-                close=df_full_stock['close'],
+                x=df_merged['time_str'],
+                open=df_merged['open'],
+                high=df_merged['high'],
+                low=df_merged['low'],
+                close=df_merged['close'],
                 name=selected_name,
-                increasing_line_color='red', increasing_fillcolor='red',
-                decreasing_line_color='green', decreasing_fillcolor='green'
+                increasing_line_color='#ef5350', # 鲜艳红
+                increasing_fillcolor='#ef5350',
+                decreasing_line_color='#26a69a', # 鲜艳绿
+                decreasing_fillcolor='#26a69a'
             ), row=1, col=1)
 
             # B. 叠加指数 (右轴)
             if not df_full_index.empty:
-                 # 指数一般只看收盘
-                idx_close = df_full_index['close'] if 'close' in df_full_index.columns else df_full_index['收盘']
-                
-                fig.add_trace(go.Scatter(
-                    x=df_full_index['time'],
-                    y=idx_close,
-                    mode='lines',
-                    name=f"指数: {idx_code}",
-                    line=dict(color='orange', width=1.5),
-                    opacity=0.7
-                ), row=1, col=1, secondary_y=True)
+                # 检查数据是否存在
+                valid_idx = df_merged['close_index'].dropna()
+                if not valid_idx.empty:
+                    fig.add_trace(go.Scatter(
+                        x=df_merged['time_str'],
+                        y=df_merged['close_index'],
+                        mode='lines',
+                        name=f"指数: {idx_code}",
+                        line=dict(color='rgba(255, 165, 0, 0.7)', width=2), # 半透明橙色
+                        hoverinfo='y+name' 
+                    ), row=1, col=1, secondary_y=True)
 
-            # C. 成交量 (Row 2), 区分颜色
-            colors = ['red' if r['close'] >= r['open'] else 'green' for _, r in df_full_stock.iterrows()]
+            # C. 成交量 (Row 2)
+            colors = ['#ef5350' if r['close'] >= r['open'] else '#26a69a' for _, r in df_merged.iterrows()]
             fig.add_trace(go.Bar(
-                x=df_full_stock['time'],
-                y=df_full_stock['volume'],
+                x=df_merged['time_str'],
+                y=df_merged['volume'],
                 name="成交量",
                 marker_color=colors
             ), row=2, col=1)
 
             # 布局优化
             fig.update_layout(
-                title=f"{selected_name} ({start_date} ~ {end_date}) 分时走势",
+                title=dict(
+                    text=f"{selected_name} ({start_date} ~ {end_date})",
+                    y=0.98  # 稍微往上一点
+                ),
                 xaxis_rangeslider_visible=False,
-                height=600,
-                margin=dict(l=50, r=50, t=50, b=50),
-                legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0, xanchor="left")
+                height=700, # 稍微高一点
+                margin=dict(l=60, r=60, t=60, b=40),
+                legend=dict(
+                    orientation="h", 
+                    y=1.01, 
+                    x=0.5, 
+                    xanchor="center"
+                ),
+                hovermode="x unified" # 统一显示 tooltip
             )
             
-            # 去掉非交易时间的 gap (Plotly 的 rangebreaks 很难完美适配 A股多日分钟线，
-            # 简单做法是使用 category 轴，但这会破坏时间刻度。
-            # 复杂做法是配置 rangebreaks)
-            # A股交易时间: 09:30-11:30, 13:00-15:00.
-            # 这里尝试添加 rangebreaks
+            # 使用 Category 轴彻底消除 Gap
             fig.update_xaxes(
-                rangebreaks=[
-                    dict(pattern='hour', bounds=[15, 9.5]), # 每天 15:00 到 次日 9:30
-                    dict(pattern='hour', bounds=[11.5, 13]), # 中午休市 11:30 - 13:00
-                    dict(bounds=["sat", "mon"]) # 周末 (虽然我们只选了 trading dates，但 rangebreaks 是基于日历的)
-                ],
+                type='category', 
+                tickmode='auto', 
+                nticks=8, # 限制显示的数量，防止重叠
                 row=2, col=1
             )
-            # 同步 row1 的 x轴
-            fig.update_xaxes(matches='x', row=1, col=1)
+            
+            # Row 1 不需要显示 x 轴 label (因为 shared_xaxes=True，通常只在最底下显示)
+            # 但 Plotly 有时候 shared_xaxes 还是会显示 category 的 grid
+            fig.update_xaxes(showticklabels=False, type='category', row=1, col=1)
+
+            # Y轴设置
+            fig.update_yaxes(title_text="价格", row=1, col=1, secondary_y=False)
+            fig.update_yaxes(title_text="指数", row=1, col=1, secondary_y=True, showgrid=False) # 右轴不显示 grid，免得乱
+            fig.update_yaxes(title_text="成交量", row=2, col=1)
 
             st.plotly_chart(fig, use_container_width=True)
+
