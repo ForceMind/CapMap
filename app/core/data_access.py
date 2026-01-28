@@ -53,26 +53,35 @@ def _init_logging():
     log_path = os.path.abspath(APP_LOG_FILE)
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+    
     logger = logging.getLogger("capmap")
     logger.setLevel(logging.INFO)
-    file_handler = None
-    for handler in logger.handlers:
-        if isinstance(handler, logging.FileHandler) and os.path.abspath(getattr(handler, "baseFilename", "")) == log_path:
-            file_handler = handler
-            break
-    if file_handler is None:
-        file_handler = logging.FileHandler(log_path, encoding="utf-8")
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+    
+    # 清理旧的 handlers 防止重复
+    logger.handlers = []
+
+    # 1. 文件输出
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    
+    # 2. 控制台输出 (Stdout)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    
     logger.propagate = False
 
     logging.captureWarnings(True)
     for name, level in (("akshare", logging.INFO), ("py.warnings", logging.WARNING)):
         other = logging.getLogger(name)
         other.setLevel(level)
-        if not any(isinstance(h, logging.FileHandler) and os.path.abspath(getattr(h, "baseFilename", "")) == log_path for h in other.handlers):
-            other.addHandler(file_handler)
+        # 清理旧的 handlers
+        other.handlers = []
+        other.addHandler(file_handler)
+        other.addHandler(console_handler)
         other.propagate = False
+    
     return logger
 
 logger = _init_logging()
