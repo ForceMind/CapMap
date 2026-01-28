@@ -6,71 +6,81 @@ from plotly.subplots import make_subplots
 
 from core.data_access import (
     fetch_cached_min_data,
+    get_all_stocks_list,
     DEFAULT_MIN_PERIOD
 )
 
 def render_stock_analysis_view(origin_df):
     st.subheader("📈 个股多日走势叠加分析")
     
+    # 获取全市场股票及搜索支持
+    all_stocks_df = get_all_stocks_list() # columns: code, name, pinyin
+    
     # --- 1. 控件区域 ---
-    col1, col2, col3, col4 = st.columns([1.5, 1.5, 1, 1.5])
+    col1, col2, col3, col4 = st.columns([2, 1.5, 1, 1.5])
     
     with col1:
-        # 1. 自动补全搜索框 (Combo box)
-        # 获取缓存中的热门列表
-        all_codes = sorted(origin_df['代码'].unique())
-        code_name_map = {}
-        unique_stocks = origin_df.drop_duplicates(subset=['代码'])[['代码', '名称']]
-        for _, row in unique_stocks.iterrows():
-            code_name_map[row['代码']] = f"{row['代码']} | {row['名称']}"
+        # 1. 统一模糊搜索框 (Smart Search)
+        # 逻辑：
+        # - 用户输入 text
+        # - 触发 rerun
+        # - 代码在 backend 过滤 search_text in code/name/pinyin
+        # - 下方选框 selectbox 用于确认具体的票
         
-        # 默认列表
-        options_list = [code_name_map[c] for c in all_codes]
-        
-        # 使用 selectbox 实现搜索 (Streamlit 原生支持输入筛选)
-        # 但如果用户想要输入不在列表里的代码，selectbox 默认不支持 custom input
-        # 变通方案：在 options 列表头部提供一个 "Custom Input..." 提示，
-        # 或者教导用户如果搜不到，就去下面的 text_input 输入。
-        # 更好的方案：既然有API，我们可以允许用户直接通过 text_input 覆盖。
-        
-        # 统一为一个控件：Selectbox with input functionality is hard in plain Streamlit.
-        # We will keep the select box for cached stocks, and a small expander or just text input for "Others".
-        
-        # 但是用户说 "Input stock in ONE place, fuzzy search supported, call API to query"
-        # 意味着如果 selectbox 搜不到，应该能 fallback 到 API 查询。
-        # 这里用一个简单的模式：如果用户在 selectbox 没找到，可以选 "手动输入"，然后弹出 text input。
-        
-        # 实际上 Streamlit selectbox 已经很好用了。只有当 origin_df 缺少该票时才需要手动。
-        # 增加一个 "🔍 搜索/输入代码"
-        
-        search_input = st.text_input("🔍 搜索/输入股票代码", placeholder="输入代码(如000001) 或 名称", help="支持模糊搜索")
+        search_text = st.text_input("🔍 搜索股票 (代码/名称/拼音)", 
+                                    placeholder="例如: 600519, 茅台, MT",
+                                    key="sa_search_input")
         
         selected_code = None
-        selected_name = "未命名"
+        selected_name = "未明"
+
+        # 过滤逻辑
+        filtered_df = pd.DataFrame()
+        if search_text:
+            s_str = search_text.strip().upper()
+            filtered_df = all_stocks_df[
+                all_stocks_df['code'].str.contains(s_str) | 
+                all_stocks_df['name'].str.contains(s_str) |
+                all_stocks_df['pinyin'].str.contains(s_str, na=False)
+            ].head(20) # 限制显示前20个以防卡顿
         
-        # 逻辑：如果 search input 有值，优先尝试匹配 manual input or filter list
-        if search_input:
-            search_str = search_input.strip()
-            # 1. 尝试在现有缓存中模糊匹配
-            matched = [opt for opt in options_list if search_str in opt]
-            if matched:
-                # 如果有匹配，显示匹配列表供选择
-                selected_display = st.selectbox("请选择匹配结果", options=matched, index=0)
-                selected_code = selected_display.split(" | ")[0]
-                selected_name = selected_display.split(" | ")[1]
-            else:
-                # 2. 没匹配到，假设是新代码，直接使用 search_str 作为 code (如果是数字)
-                if search_str.isdigit() and len(search_str) == 6:
-                    selected_code = search_str
-                    selected_name = f"未知 ({selected_code})"
-                    st.caption("⚠️ 本地缓存未找到，尝试直接拉取数据...")
-                else:
-                    st.warning("未找到匹配股票，请输入准确的6位代码。")
+        # 构建下拉选项
+        # 如果有搜索结果，显示结果
+        # 如果没搜索，为了性能，只显示 "热门/缓存" (如果有缓存 origin_df) 或者留空等待输入
+        options_map = {}
+        
+        if not filtered_df.empty:
+            for _, row in filtered_df.iterrows():
+                label = f"{row['code']} | {row['name']}"
+                options_map[label] = row['code']
+        elif search_text and filtered_df.empty:
+             st.caption("⚠️ 未找到匹配，尝试直接输入代码...")
         else:
-             # 没输入，显示默认热门/全部列表
-            selected_display = st.selectbox("选择或搜索缓存股票", options=options_list, index=0)
-            selected_code = selected_display.split(" | ")[0]
-            selected_name = selected_display.split(" | ")[1]
+             # 默认显示 origin_df 里的缓存票作为推荐
+             # 但为了避免混淆，如果没有输入，可以显示一个提示项，或者显示前几个热门
+             # 这里简单处理：如果没有输入，列表就是空的，强迫用户输入。
+             # 为了方便，可以把 origin_df 里的加进去
+             if not origin_df.empty:
+                 unique_stocks = origin_df.drop_duplicates(subset=['代码'])[['代码', '名称']]
+                 for _, row in unique_stocks.iterrows():
+                    label = f"📝 [缓存] {row['代码']} | {row['名称']}"
+                    options_map[label] = row['代码']
+
+        # Selectbox 用于最终选择
+        if options_map:
+            selection = st.selectbox("请选择", options=list(options_map.keys()), index=0, label_visibility="collapsed")
+            if selection:
+                selected_code = options_map[selection]
+                selected_name = selection.split("|")[-1].strip()
+        else:
+            # Fallback for direct code input not in list
+            if search_text and search_text.isdigit() and len(search_text) == 6:
+                selected_code = search_text
+                selected_name = f"未知 ({search_text})"
+                st.info(f"直接使用代码: {selected_code}")
+            else:
+                st.info("👆 请输入关键词开始搜索")
+                return # 没选就不渲染下面
 
     with col2:
         # 日期范围选择

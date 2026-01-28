@@ -13,6 +13,7 @@ import zipfile
 import shutil
 import json
 import logging
+from pypinyin import lazy_pinyin
 
 from core.providers import (
     fetch_biying_daily,
@@ -38,6 +39,56 @@ NAME_REFRESH_FILE = "data/name_refresh.json"
 NAME_REFRESH_TTL_HOURS = 24 * 180
 NAME_REFRESH_MIN_INTERVAL_MINUTES = 30
 NAME_MAP_VERSION = 1
+ALL_STOCKS_CACHE_FILE = "data/all_stocks_list.csv"
+
+def get_all_stocks_list(force_update=False):
+    """
+    获取所有 A 股列表 (代码, 名称, 拼音首字母)
+    优先读取缓存，过期或不存在则调用 AkShare
+    """
+    # 检查缓存是否存在
+    if not force_update and os.path.exists(ALL_STOCKS_CACHE_FILE):
+        try:
+            # 简单检查文件是否超过 24 小时
+            mtime = os.path.getmtime(ALL_STOCKS_CACHE_FILE)
+            if time.time() - mtime < 24 * 3600:
+                df = pd.read_csv(ALL_STOCKS_CACHE_FILE, dtype={'code': str})
+                return df
+        except Exception as e:
+            logging.error(f"Error reading stock list cache: {e}")
+    
+    # Fetch from AkShare
+    try:
+        # 使用 st.spinner 如果在 streamlit 环境下
+        # 但 data_access 可能是后台运行，尽量用 logging
+        logging.info("Fetching all stocks from AkShare...")
+        df = ak.stock_zh_a_spot_em()
+        # akshare 返回: 序号, 代码, 名称, 最新价, ...
+        # 我们只要 代码, 名称
+        df = df[['代码', '名称']].rename(columns={'代码': 'code', '名称': 'name'})
+        
+        # Generate Pinyin
+        def get_pinyin_first_letters(text):
+            try:
+                if not isinstance(text, str): return ""
+                return "".join([p[0].upper() for p in lazy_pinyin(text) if p])
+            except:
+                return ""
+            
+        df['pinyin'] = df['name'].apply(get_pinyin_first_letters)
+        
+        # Save
+        if not os.path.exists("data"):
+            os.makedirs("data")
+        df.to_csv(ALL_STOCKS_CACHE_FILE, index=False)
+        return df
+    except Exception as e:
+        logging.error(f"Error fetching stocks from AkShare: {e}")
+        # 如果下载失败，尝试读取旧缓存即使过期
+        if os.path.exists(ALL_STOCKS_CACHE_FILE):
+             return pd.read_csv(ALL_STOCKS_CACHE_FILE, dtype={'code': str})
+        return pd.DataFrame(columns=['code', 'name', 'pinyin'])
+
 APP_LOG_FILE = "logs/app.log"
 INTRADAY_WORKERS = int(os.environ.get("INTRADAY_WORKERS", "50"))
 INTRADAY_DELAY_SEC = float(os.environ.get("INTRADAY_DELAY_SEC", "0.05"))
