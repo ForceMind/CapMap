@@ -91,7 +91,7 @@ def render_data_manager(origin_df):
         
         with exist_col:
              st.success(f"已缓存股票 ({len(cached_codes)})")
-             st.text_area("已缓存代码预览", ",".join(cached_codes[:500]) + ("..." if len(cached_codes)>500 else ""), height=150)
+             st.text_area("已缓存代码预览", ",".join(list(cached_codes)[:500]) + ("..." if len(cached_codes)>500 else ""), height=150)
 
         if missing_codes:
             missing_lines = [f"{c} {name_map.get(c, c)}" for c in missing_codes]

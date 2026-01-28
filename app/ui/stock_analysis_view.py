@@ -38,49 +38,73 @@ def render_stock_analysis_view(origin_df):
         filtered_df = pd.DataFrame()
         if search_text:
             s_str = search_text.strip().upper()
-            filtered_df = all_stocks_df[
-                all_stocks_df['code'].str.contains(s_str) | 
-                all_stocks_df['name'].str.contains(s_str) |
-                all_stocks_df['pinyin'].str.contains(s_str, na=False)
-            ].head(20) # 限制显示前20个以防卡顿
+            if not all_stocks_df.empty:
+                filtered_df = all_stocks_df[
+                    all_stocks_df['code'].str.contains(s_str) | 
+                    all_stocks_df['name'].str.contains(s_str) |
+                    all_stocks_df['pinyin'].str.contains(s_str, na=False)
+                ].head(20) # 限制显示前20个以防卡顿
         
         # 构建下拉选项
-        # 如果有搜索结果，显示结果
-        # 如果没搜索，为了性能，只显示 "热门/缓存" (如果有缓存 origin_df) 或者留空等待输入
         options_map = {}
         
+        # 1. 优先展示搜索匹配结果
         if not filtered_df.empty:
             for _, row in filtered_df.iterrows():
+                # 格式: 代码 | 名称
                 label = f"{row['code']} | {row['name']}"
                 options_map[label] = row['code']
-        elif search_text and filtered_df.empty:
-             st.caption("⚠️ 未找到匹配，尝试直接输入代码...")
-        else:
-             # 默认显示 origin_df 里的缓存票作为推荐
-             # 但为了避免混淆，如果没有输入，可以显示一个提示项，或者显示前几个热门
-             # 这里简单处理：如果没有输入，列表就是空的，强迫用户输入。
-             # 为了方便，可以把 origin_df 里的加进去
+                
+        # 2. 如果没有匹配结果，但输入看起来像是一个6位代码
+        #    强制添加一个选项，允许用户"回车"确认查询
+        elif search_text and search_text.strip().isdigit() and len(search_text.strip()) == 6:
+             manual_code = search_text.strip()
+             label = f"{manual_code} | (直接查询)"
+             options_map[label] = manual_code
+             
+        # 3. 如果搜索框为空，显示"历史/热门"缓存
+        #    这样既保留了便捷性，又不会在搜索失败时干扰视线
+        elif not search_text:
              if not origin_df.empty:
+                 # 添加一个占位符，提示用户
+                 options_map["📋 请输入代码或从下方选择..."] = None
+                 
                  unique_stocks = origin_df.drop_duplicates(subset=['代码'])[['代码', '名称']]
                  for _, row in unique_stocks.iterrows():
-                    label = f"📝 [缓存] {row['代码']} | {row['名称']}"
+                    label = f"{row['代码']} | {row['名称']}"
                     options_map[label] = row['代码']
 
-        # Selectbox 用于最终选择
+        # Selectbox 用于显示结果
+        # 如果 options_map 为空（搜了东西但没搜到，也不像代码），则显示提示
         if options_map:
-            selection = st.selectbox("请选择", options=list(options_map.keys()), index=0, label_visibility="collapsed")
-            if selection:
-                selected_code = options_map[selection]
-                selected_name = selection.split("|")[-1].strip()
-        else:
-            # Fallback for direct code input not in list
-            if search_text and search_text.isdigit() and len(search_text) == 6:
-                selected_code = search_text
-                selected_name = f"未知 ({search_text})"
-                st.info(f"直接使用代码: {selected_code}")
+            # 这里的 label_visibility="collapsed" 是为了让它看起来像是搜索框的一部分
+            selection_label = st.selectbox(
+                label="选择股票", 
+                options=list(options_map.keys()), 
+                index=0, 
+                label_visibility="collapsed",
+                key="sa_selectbox_result"
+            )
+            
+            # 处理选中逻辑
+            if selection_label and options_map[selection_label]:
+                selected_code = options_map[selection_label]
+                # 尝试分离名称
+                parts = selection_label.split("|")
+                # 如果是 (直接查询)，名字暂定未知
+                if "(直接查询)" in parts[-1]:
+                    selected_name = f"未知 ({selected_code})"
+                else:
+                    selected_name = parts[-1].strip()
             else:
-                st.info("👆 请输入关键词开始搜索")
-                return # 没选就不渲染下面
+                 # 选中了占位符
+                 if selection_label == "📋 请输入代码或从下方选择...":
+                     st.info("👆 请在上方输入代码、名称或拼音")
+                     return
+        else:
+            # 搜索无结果情况
+             st.warning("⚠️ 未找到匹配股票，请输入准确的6位代码")
+             return
 
     with col2:
         # 日期范围选择
@@ -102,6 +126,11 @@ def render_stock_analysis_view(origin_df):
             options=["None", "000300 (沪深300)", "000905 (中证500)", "000852 (中证1000)", "000001 (上证指数)"],
             index=1 # 默认沪深300
         )
+        if st.toggle("更新列表", help="如果搜不到股票，点此强制更新全市场列表"):
+             # 这里用 toggle+spinner 是一种比较轻量的方式，主要是为了触发逻辑
+             with st.spinner("正在同步A股列表..."):
+                 get_all_stocks_list(force_update=True)
+             st.rerun()
     
     with col4:
         st.write("") # Spacer
