@@ -990,16 +990,16 @@ def fetch_history_data(index_pool="000300"):
                         _df = pd.DataFrame(rows)
                         
                         # --- Enhanced Column Mapping ---
-                        # Map Date: d=date
-                        date_col = next((c for c in ['d', 'date', '日期', 'time'] if c in _df.columns), None)
+                        # Map Date: d=date, t=timestamp/date
+                        date_col = next((c for c in ['d', 'date', '日期', 'time', 't'] if c in _df.columns), None)
                         # Map Close: c=close, p=price
                         close_col = next((c for c in ['c', 'close', '收盘', 'p'] if c in _df.columns), None)
                         
                         if date_col and close_col:
                             rename_map = {date_col: '日期', close_col: '收盘'}
                             
-                            # Map Amount: e=amount (turnover)
-                            amount_col = next((c for c in ['e', 'amount', '成交额', 'cje', 'money'] if c in _df.columns), None)
+                            # Map Amount: e=amount (turnover), a=amount
+                            amount_col = next((c for c in ['e', 'amount', '成交额', 'cje', 'money', 'a'] if c in _df.columns), None)
                             if amount_col: rename_map[amount_col] = '成交额'
                             
                             # Map change: zf=pct_chg
@@ -1009,11 +1009,41 @@ def fetch_history_data(index_pool="000300"):
                             _df = _df.rename(columns=rename_map)
                             
                             _df['代码'] = code
-                            _df['日期'] = pd.to_datetime(_df['日期'])
+                            
+                            # Handle Date Parsing (Smart)
+                            def smart_parse_date(x):
+                                try:
+                                    # Try standard string or timestamp
+                                    return pd.to_datetime(x)
+                                except:
+                                    # Fallback for millisecond timestamps if generic parse fails
+                                    try:
+                                        if isinstance(x, (int, float)) and x > 1e12:
+                                            return pd.to_datetime(x, unit='ms')
+                                    except:
+                                        pass
+                                    return pd.NaT
+
+                            _df['日期'] = _df['日期'].apply(smart_parse_date)
                             
                             # Fill missing
-                            for col in ['涨跌幅', '成交额']:
-                                if col not in _df.columns: _df[col] = 0.0
+                            if '成交额' not in _df.columns: _df['成交额'] = 0.0
+                            
+                            # Calculate Change % if missing but have Close and PreClose (pc)
+                            if '涨跌幅' not in _df.columns:
+                                if 'pc' in _df.columns and '收盘' in _df.columns:
+                                    try:
+                                        _df['pc'] = pd.to_numeric(_df['pc'], errors='coerce')
+                                        _df['收盘'] = pd.to_numeric(_df['收盘'], errors='coerce')
+                                        _df['涨跌幅'] = (_df['收盘'] - _df['pc']) / _df['pc'] * 100
+                                    except:
+                                        _df['涨跌幅'] = 0.0
+                                else:
+                                    _df['涨跌幅'] = 0.0
+                            
+                            # Clean up NaNs
+                            _df['涨跌幅'] = _df['涨跌幅'].fillna(0.0)
+                            _df['成交额'] = _df['成交额'].fillna(0.0)
                                 
                             return _df[['日期', '收盘', '涨跌幅', '成交额', '代码']]
                         else:
