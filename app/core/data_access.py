@@ -596,6 +596,152 @@ def clear_min_cache():
     if os.path.isdir(MIN_CACHE_DIR):
         shutil.rmtree(MIN_CACHE_DIR, ignore_errors=True)
 
+
+def delete_daily_cache_for_date(date_obj):
+    """
+    删除指定日期的日线缓存数据
+    """
+    if not os.path.exists(CACHE_FILE):
+        return False
+    try:
+        df = pd.read_parquet(CACHE_FILE)
+        if df.empty:
+            return False
+        
+        # 确保日期列类型一致
+        df['日期'] = pd.to_datetime(df['日期'])
+        target_ts = pd.Timestamp(date_obj)
+        
+        # 过滤掉该日期的数据
+        new_df = df[df['日期'].dt.date != target_ts.date()].copy()
+        
+        if len(new_df) < len(df):
+            new_df.to_parquet(CACHE_FILE)
+            logger.info("已删除日期 %s 的缓存数据", date_obj)
+            return True
+        return False
+    except Exception as e:
+        logger.error("删除日线缓存失败: %s", e)
+        return False
+
+def refetch_daily_data(date_obj):
+    """
+    强制重新获取指定日期的日线数据并更新缓存
+    """
+    try:
+        date_str = date_obj.strftime("%Y%m%d")
+        logger.info("开始修复/重取日期 %s 的数据", date_str)
+        
+        # 1. 获取成分股
+        try:
+            cons_df = ak.index_stock_cons(symbol="000300")
+        except:
+            cons_df = None
+            
+        # 如果获取不到，尝试从现有缓存中提取代码列表 (假设缓存里其他天的数据是好的)
+        if cons_df is None or cons_df.empty:
+             if os.path.exists(CACHE_FILE):
+                 cached_df = pd.read_parquet(CACHE_FILE)
+                 if not cached_df.empty:
+                     codes = cached_df['代码'].unique().tolist()
+                     # 构造伪 cons_df
+                     cons_df = pd.DataFrame({'代码': codes, '名称': ['']*len(codes)})
+                     logger.info("使用缓存中的代码列表进行修复: %s 个", len(codes))
+
+        if cons_df is None or cons_df.empty:
+            return False, "无法获取成分股列表"
+
+        if 'variety' in cons_df.columns:
+            code_col = 'variety'
+        elif '品种代码' in cons_df.columns:
+            code_col = '品种代码'
+        else:
+            code_col = cons_df.columns[0]
+        
+        stock_list = cons_df[code_col].tolist()
+        
+        # 2. 定义单日获取函数 (复用 fetch_biying_daily / akshare)
+        providers = get_provider_order()
+        licence = get_biying_licence()
+        
+        new_rows = []
+        
+        # 使用多线程加速
+        def _worker(code):
+            # 优先顺序
+            row = None
+            for p in providers:
+                if p == 'biying' and licence:
+                    try:
+                        # fetch_biying_daily 返回的是 DataFrame
+                        d = fetch_biying_daily(code, date_str, date_str, licence)
+                        if d is not None and not d.empty:
+                            return d.assign(代码=code)
+                    except:
+                        pass
+                
+                if p == 'akshare':
+                    try:
+                        # akshare hist
+                        d = ak.stock_zh_a_hist(symbol=code, start_date=date_str, end_date=date_str, adjust="qfq")
+                        if d is not None and not d.empty:
+                            # 格式化列名以匹配缓存结构
+                            # akshare returns: 日期, 开盘, 收盘, 最高, 最低, 成交量, 成交额, 振幅, 涨跌幅, 涨跌额, 换手率
+                            d = d.rename(columns={
+                                '日期': '日期', '收盘': '收盘', '涨跌幅': '涨跌幅', '成交额': '成交额'
+                            })
+                            return d[['日期', '收盘', '涨跌幅', '成交额']].assign(代码=code)
+                    except:
+                        pass
+            return None
+
+        # 简单进度显示（在日志中）
+        ctx = get_script_run_ctx()
+        def _worker_wrapper(code):
+             if ctx:
+                 add_script_run_ctx(threading.current_thread(), ctx)
+             return _worker(code)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            project = {executor.submit(_worker_wrapper, c): c for c in stock_list}
+            for future in concurrent.futures.as_completed(project):
+                res = future.result()
+                if res is not None and not res.empty:
+                    new_rows.append(res)
+        
+        if not new_rows:
+            return False, "未能获取到任何有效数据"
+            
+        # 3. 合并与保存
+        new_df = pd.concat(new_rows, ignore_index=True)
+        # 确保类型
+        new_df['日期'] = pd.to_datetime(new_df['日期'])
+        new_df['涨跌幅'] = pd.to_numeric(new_df['涨跌幅'], errors='coerce')
+        new_df['成交额'] = pd.to_numeric(new_df['成交额'], errors='coerce')
+        new_df['收盘'] = pd.to_numeric(new_df['收盘'], errors='coerce')
+        
+        # 读取旧缓存并剔除当日数据
+        if os.path.exists(CACHE_FILE):
+             old_df = pd.read_parquet(CACHE_FILE)
+             old_df['日期'] = pd.to_datetime(old_df['日期'])
+             # 剔除
+             target_ts = pd.Timestamp(date_obj)
+             old_df = old_df[old_df['日期'].dt.date != target_ts.date()]
+             final_df = pd.concat([old_df, new_df], ignore_index=True)
+        else:
+             final_df = new_df
+        
+        # 补充名称
+        final_df = _refresh_cached_names(final_df)
+        final_df = final_df.sort_values('日期')
+        
+        final_df.to_parquet(CACHE_FILE)
+        return True, f"成功修复，获取到 {len(new_rows)} 只股票数据"
+
+    except Exception as e:
+        logger.error("修复数据失败: %s", e)
+        return False, str(e)
+
 def get_start_date(years_back=2):
     """计算 N 年前的日期，返回 YYYYMMDD 字符串"""
     target = datetime.now() - timedelta(days=365 * years_back)

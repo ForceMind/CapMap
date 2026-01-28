@@ -100,6 +100,50 @@ def render_history_view(df, available_dates):
     if len(target_dates) == 1:
         # 单日逻辑
         daily_df = df[df['日期'].dt.date == selected_date].copy()
+        
+        # --- 自动检测数据质量 & 修复机制 ---
+        from core.data_access import refetch_daily_data, delete_daily_cache_for_date
+        
+        stock_count = len(daily_df)
+        # CSI300 通常有 290-300 只票。如果少于 200，或者全为空，可能是有问题的缓存 (除非是早期数据)
+        # 另外检测是否全是 0
+        
+        is_suspicious = False
+        warning_msg = ""
+        
+        if stock_count == 0:
+             # 如果选中的日期在 available_dates 里但筛选为空，这逻辑上不太可能，除非 df 变化了
+             is_suspicious = True
+             warning_msg = "数据为空"
+        elif stock_count < 200:
+             is_suspicious = True
+             warning_msg = f"数据量过少 ({stock_count} 只，正常约 300 只)"
+        
+        if is_suspicious:
+            st.warning(f"⚠️ 检测到 {display_date_str} 的数据可能不完整: {warning_msg}")
+            c1, c2, c3 = st.columns([1, 1, 5])
+            with c1:
+                if st.button("🛠️ 尝试修复", help="重新从数据源拉取该日数据并覆盖缓存"):
+                    with st.spinner("正在修复数据..."):
+                        success, msg = refetch_daily_data(selected_date)
+                        if success:
+                            st.success(msg)
+                            time.sleep(1)
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"修复失败: {msg}")
+            
+            with c2:
+                if st.button("🗑️ 删除今日", help="删除该日数据（下次启动时可能会重新尝试获取）"):
+                     if delete_daily_cache_for_date(selected_date):
+                         st.success("已删除。")
+                         time.sleep(1)
+                         st.cache_data.clear()
+                         st.rerun()
+                     else:
+                         st.error("删除失败")
+
         if daily_df.empty:
             st.warning(f"{selected_date} 当日无交易数据。")
             st.stop()
