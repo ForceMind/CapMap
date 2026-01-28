@@ -578,17 +578,35 @@ def _refresh_name_map_if_needed(force=False):
     providers = get_provider_order()
     licence = get_biying_licence()
     if "biying" in providers and licence:
+        name_map = {}
+        # 1. Biying
         try:
-            name_map = fetch_biying_stock_list(licence)
+            from core.providers import fetch_biying_stock_list
+            biying_map = fetch_biying_stock_list(licence)
+            if biying_map:
+                name_map.update(biying_map)
         except Exception as e:
             logger.warning("必盈名称源调用失败: %s", e)
-            name_map = {}
+            
+        # 2. AkShare (Add this)
+        try:
+             import akshare as ak
+             logger.info("Fetching AkShare name list for correction...")
+             df_ak = ak.stock_zh_a_spot_em()
+             if not df_ak.empty and '代码' in df_ak.columns and '名称' in df_ak.columns:
+                df_ak['代码'] = df_ak['代码'].astype(str)
+                df_ak['名称'] = df_ak['名称'].astype(str)
+                ak_map = dict(zip(df_ak['代码'], df_ak['名称']))
+                name_map.update(ak_map)
+        except Exception as e:
+             logger.warning("AkShare名称源调用失败: %s", e)
+
         if name_map:
             _save_name_map(name_map)
-            logger.info("名称映射更新成功: source=biying count=%s", len(name_map))
+            logger.info("名称映射更新成功: count=%s", len(name_map))
             state["last_refresh_ts"] = now_ts
             state["name_map_version"] = NAME_MAP_VERSION
-            state["last_source"] = "biying"
+            state["last_source"] = "biying+akshare"
             _save_name_refresh_state(state)
             return name_map
     def _try_source(label, fn):
@@ -868,10 +886,11 @@ def get_start_date(years_back=2):
     target = datetime.now() - timedelta(days=365 * years_back)
     return target.strftime("%Y%m%d")
 
-def fetch_history_data(index_pool="000300"):
+def fetch_history_data(index_pool="000300", force_today=False):
     """
     获取成分股历史数据。支持不同指数池切换。
     index_pool: "000300" (沪深300), "000905" (中证500), "000852" (中证1000)
+    force_today: 是否强制拉取今日数据(盘中实时)
     """
     # 映射文件与名称
     pool_meta = {
@@ -885,7 +904,7 @@ def fetch_history_data(index_pool="000300"):
     
     current_cache_file = f"data/{file_key}_history_cache.parquet"
     
-    logger.info(f"开始加载历史数据 Pool={index_pool} ({pool_desc})")
+    logger.info(f"开始加载历史数据 Pool={index_pool} ({pool_desc}) force_today={force_today}")
     
     # 确保 data 目录存在
     if not os.path.exists("data"):
@@ -908,12 +927,36 @@ def fetch_history_data(index_pool="000300"):
             st.error(f"读取[{pool_desc}]缓存失败: {e}")
 
     # 2. 计算需要下载的时间范围
-    today = datetime.now().date()
+    now = datetime.now()
+    today = now.date()
+    
+    # 自动更新逻辑:
+    # 1. 如果 force_today=True (用户手动刷新今日)，则必须包含 today
+    # 2. 否则，只有在 15:15 之后才尝试自动拉取 today
+    include_today = force_today or (now.hour > 15 or (now.hour == 15 and now.minute >= 15))
+    
+    if include_today:
+        end_date_str = today.strftime("%Y%m%d")
+    else:
+        end_date_str = (today - timedelta(days=1)).strftime("%Y%m%d")
     
     if last_cached_date:
-        if last_cached_date >= today:
-             return _refresh_cached_names(cached_df)
-        start_date_str = (last_cached_date + timedelta(days=1)).strftime("%Y%m%d")
+        # 如果缓存已经包含目标结束日期(或更新)，则无需下载
+        # 除非是强制刷新今日且缓存里已经是今日(需要覆盖)
+        target_date = datetime.strptime(end_date_str, "%Y%m%d").date()
+        
+        if last_cached_date >= target_date:
+             if not (force_today and last_cached_date == today):
+                 return _refresh_cached_names(cached_df)
+             else:
+                 logger.info("强制刷新今日数据，移除缓存中今日部分")
+                 cached_df = cached_df[cached_df['日期'].dt.date < today]
+                 last_cached_date = cached_df['日期'].max().date() if not cached_df.empty else None
+                 
+        if last_cached_date:
+             start_date_str = (last_cached_date + timedelta(days=1)).strftime("%Y%m%d")
+        else:
+             start_date_str = get_start_date(2)
     else:
         # 如果是首次下载，默认下载2年
         start_date_str = get_start_date(2)
@@ -1098,6 +1141,7 @@ def fetch_history_data(index_pool="000300"):
         progress_bar.empty()
         
         # Merge Results
+        final_df = pd.DataFrame()
         if new_dfs:
             df_new_all = pd.concat(new_dfs, ignore_index=True)
             # Type conversion
@@ -1109,21 +1153,73 @@ def fetch_history_data(index_pool="000300"):
             # Append to cache
             if not cached_df.empty:
                 # Remove overlaps
-                cached_df = cached_df[cached_df['日期'] < pd.to_datetime(start_date_str)]
+                try:
+                    start_dt = pd.to_datetime(start_date_str)
+                    cached_df = cached_df[cached_df['日期'] < start_dt]
+                except: pass
                 final_df = pd.concat([cached_df, df_new_all], ignore_index=True)
             else:
                 final_df = df_new_all
             
-            # Save
-            final_df = final_df.sort_values(['代码', '日期'])
             status_text.success(f"✅ [{pool_desc}] 更新完成: {len(df_new_all)} 条新记录")
-            
+        else:
+            final_df = cached_df
+            status_text.warning("未获取到新数据")
+
+        # --- 3. 尝试合并今日实时快照 (盘中) ---
+        if include_today and not final_df.empty:
+             has_today = False
+             today_ts = pd.Timestamp(today)
+             if '日期' in final_df.columns and today_ts in pd.to_datetime(final_df['日期']).values:
+                 has_today = True
+             
+             if not has_today:
+                 st.info(f"正在拉取今日({today})实时快照(盘中)...")
+                 try:
+                     from core.providers import fetch_biying_all_realtime
+                     snap_df = pd.DataFrame()
+                     # Try Biying
+                     if licence:
+                         try:
+                             snap_df = fetch_biying_all_realtime(licence)
+                         except: pass
+                     
+                     # Try AkShare Fallback
+                     if snap_df.empty:
+                          import akshare as ak
+                          try:
+                              s = ak.stock_zh_a_spot_em()
+                              if not s.empty:
+                                 s = s.rename(columns={'最新价':'close', '涨跌幅':'pct_chg', '成交额':'amount', '代码':'code', '名称':'name'})
+                                 snap_df = s
+                          except: pass
+                     
+                     if not snap_df.empty:
+                         snap_df['code'] = snap_df['code'].astype(str)
+                         cons_set = set([str(x) for x in cons_codes])
+                         snap_df = snap_df[snap_df['code'].isin(cons_set)]
+                         
+                         if not snap_df.empty:
+                             snap_df['日期'] = today_ts
+                             snap_df['收盘'] = pd.to_numeric(snap_df['close'], errors='coerce')
+                             snap_df['涨跌幅'] = pd.to_numeric(snap_df['pct_chg'], errors='coerce')
+                             snap_df['成交额'] = pd.to_numeric(snap_df['amount'], errors='coerce')
+                             snap_df['代码'] = snap_df['code']
+                             snap_df['名称'] = snap_df['name'] if 'name' in snap_df.columns else ''
+                             
+                             snap_rows = snap_df[['日期', '收盘', '涨跌幅', '成交额', '代码', '名称']]
+                             final_df = pd.concat([final_df, snap_rows], ignore_index=True)
+                             st.toast(f"✅ 已合并今日实时快照: {len(snap_rows)} 条")
+                 except Exception as e:
+                     logger.warning(f"Snapshot failed: {e}")
+
+        # Save
+        if not final_df.empty:
+            final_df = final_df.sort_values(['代码', '日期'])
             final_df = _refresh_cached_names(final_df)
             final_df.to_parquet(current_cache_file)
-            
             return final_df
         else:
-            status_text.warning("未获取到新数据 (可能是非交易日)")
             return _refresh_cached_names(cached_df)
 
     except Exception as e:

@@ -83,20 +83,13 @@ with st.sidebar:
     with st.expander("数据刷新与维护", expanded=True):
         st.write("如果数据显示不正确，请尝试以下操作：")
         
-        # 1. ????
+        # 1. 刷新今日行情 (盘中)
         if st.button("🟢 刷新今日行情 (盘中)"):
             log_action("刷新今日行情(盘中)")
-            try:
-                if os.path.exists(CACHE_FILE):
-                    _df = pd.read_parquet(CACHE_FILE)
-                    _today = datetime.now().date()
-                    _df_new = _df[_df["日期"].dt.date < _today]
-                    _df_new.to_parquet(CACHE_FILE)
-                    st.toast("已清除今日缓存，正在重新拉取实时数据...")
-                st.cache_data.clear()
-                st.rerun()
-            except Exception as e:
-                st.error(f"操作失败: {e}")
+            st.session_state["force_refresh_today"] = True
+            st.cache_data.clear()
+            st.toast("即将强制拉取今日盘中数据...")
+            st.rerun()
 
         # 2. ??????????
         if st.button("🧹 清空分时图内存缓存"):
@@ -192,7 +185,10 @@ with st.sidebar:
 # 加载数据
 with st.spinner("正在初始化历史数据仓库..."):
     pool_code = st.session_state.get("index_pool_code", "000300")
-    origin_df = fetch_history_data(pool_code)
+    force_today = st.session_state.get("force_refresh_today", False)
+    origin_df = fetch_history_data(pool_code, force_today=force_today)
+    if force_today:
+        st.session_state["force_refresh_today"] = False
     _start_auto_prefetch_if_needed(origin_df)
 
 # --- 后台任务检测与控制 ---
