@@ -899,63 +899,60 @@ def fetch_history_data():
                         df_hist = fetch_biying_daily(code, start_date_str, end_date_str, licence, is_index=False, period="d")
                         if df_hist is not None and not df_hist.empty:
                             df_hist = df_hist.copy()
-                            df_hist['??'] = code
-                            df_hist['??'] = name
+                            df_hist['代码'] = code
+                            df_hist['名称'] = name
                             return df_hist
                     except Exception as e:
-                        logger.warning("????????: code=%s err=%s", code, e)
+                        logger.warning("必盈异常: code=%s err=%s", code, e)
                 elif provider == "akshare":
                     try:
-                        # ????
-                        logger.info("????: stock_zh_a_hist code=%s start=%s end=%s", code, start_date_str, end_date_str)
+                        # AkShare 拉取
+                        logger.info("AkShare: stock_zh_a_hist code=%s start=%s end=%s", code, start_date_str, end_date_str)
                         df_hist = ak.stock_zh_a_hist(symbol=code, start_date=start_date_str, end_date=end_date_str, adjust="qfq")
-                        # ????????
-                        # ?? df_hist ?????????? today_spot_map???????
+                        
+                        # 检查今日数据是否获取到
                         fetched_today = False
                         if df_hist is not None and not df_hist.empty:
-                            logger.info("??????: code=%s rows=%s", code, len(df_hist))
-                            df_hist['??'] = pd.to_datetime(df_hist['??'])
-                            if end_date_str in df_hist['??'].dt.strftime("%Y%m%d").values:
+                            logger.info("获取成功: code=%s rows=%s", code, len(df_hist))
+                            df_hist['日期'] = pd.to_datetime(df_hist['日期'])
+                            if end_date_str in df_hist['日期'].dt.strftime("%Y%m%d").values:
                                 fetched_today = True
                         else:
-                            logger.warning("???????: code=%s", code)
+                            logger.warning("获取为空: code=%s", code)
                             df_hist = pd.DataFrame()
 
-                        # ??????????????????? (end_date_str == today)???
+                        # 尝试补齐今日盘中数据
                         if (not fetched_today) and (end_date_str == datetime.now().strftime("%Y%m%d")):
                             if code in today_spot_map:
                                 row = today_spot_map[code]
-                                # ????
-                                # ????: ??, ??, ???, ???, ??, ??
-                                # spot row keys: '???', '???', '???'
                                 try:
                                     new_row = pd.DataFrame([{
-                                        '??': pd.to_datetime(end_date_str),
-                                        '??': row['???'],
-                                        '???': row['???'],
-                                        '???': row['???'],
-                                        '??': code,
-                                        '??': name
+                                        '日期': pd.to_datetime(end_date_str),
+                                        '收盘': row['最新价'],
+                                        '涨跌幅': row['涨跌幅'],
+                                        '成交额': row['成交额'],
+                                        '代码': code,
+                                        '名称': name
                                     }])
                                     df_hist = pd.concat([df_hist, new_row], ignore_index=True)
                                 except Exception:
                                     pass
 
                         if df_hist is not None and not df_hist.empty:
-                            # ?????
-                            if '??' not in df_hist.columns:
+                            # 确保列名正确
+                            if '日期' not in df_hist.columns:
                                 return None
-                            cols_needed = ['??', '??', '???', '???']
+                            cols_needed = ['日期', '收盘', '涨跌幅', '成交额']
                             for c in cols_needed:
                                 if c not in df_hist.columns:
                                     return None
 
                             df_hist = df_hist[cols_needed].copy()
-                            df_hist['??'] = code
-                            df_hist['??'] = name
+                            df_hist['代码'] = code
+                            df_hist['名称'] = name
                             return df_hist
                     except Exception as e:
-                        logger.warning("??????: code=%s err=%s", code, e)
+                        logger.warning("AkShare异常: code=%s err=%s", code, e)
             return None
         ctx = get_script_run_ctx()
         def fetch_one_stock_wrapper(code, name):
