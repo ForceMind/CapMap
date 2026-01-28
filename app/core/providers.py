@@ -297,18 +297,55 @@ def fetch_biying_intraday(symbol, date_str, period, licence, is_index=False):
         if c in df.columns:
             open_col = c
             break
+    high_col = None
+    for c in ("h", "high", "最高"):
+        if c in df.columns:
+            high_col = c
+            break
+    low_col = None
+    for c in ("l", "low", "最低"):
+        if c in df.columns:
+            low_col = c
+            break
+    vol_col = None
+    for c in ("v", "vol", "volume", "成交量"):
+        if c in df.columns:
+            vol_col = c
+            break
+
     if not time_col or not close_col:
         return None
+    
     df["time"] = df[time_col].apply(_parse_biying_time)
     df["close"] = pd.to_numeric(df[close_col], errors="coerce")
+    
     if open_col and open_col in df.columns:
-        base = pd.to_numeric(df[open_col], errors="coerce").iloc[0]
+        df["open"] = pd.to_numeric(df[open_col], errors="coerce")
     else:
-        base = df["close"].iloc[0]
+        df["open"] = df["close"]
+        
+    if high_col and high_col in df.columns:
+        df["high"] = pd.to_numeric(df[high_col], errors="coerce")
+    else:
+        df["high"] = df[["open", "close"]].max(axis=1)
+        
+    if low_col and low_col in df.columns:
+        df["low"] = pd.to_numeric(df[low_col], errors="coerce")
+    else:
+        df["low"] = df[["open", "close"]].min(axis=1)
+
+    if vol_col and vol_col in df.columns:
+        df["volume"] = pd.to_numeric(df[vol_col], errors="coerce")
+    else:
+        df["volume"] = 0
+
+    base = df["open"].iloc[0]
     if pd.isna(base) or base == 0:
         base = df["close"].iloc[0]
+        
     df["pct_chg"] = (df["close"] - base) / base * 100
-    return df[["time", "pct_chg", "close"]].copy()
+    
+    return df[["time", "pct_chg", "open", "high", "low", "close", "volume"]].copy()
 
 
 def fetch_biying_daily(symbol, start_date, end_date, licence, is_index=False, period="d"):

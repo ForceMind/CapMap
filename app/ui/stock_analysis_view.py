@@ -16,22 +16,43 @@ def render_stock_analysis_view(origin_df):
     col1, col2, col3, col4 = st.columns([1.5, 1.5, 1, 1.5])
     
     with col1:
-        # 获取所有股票代码和名称
+        # 1. 输入股票代码（支持手动输入没缓存的）
+        user_input_code = st.text_input("股票代码 (可选)", placeholder="例如: 600519", help="如果下拉列表里没有，在此输入")
+        
+        # 2. 下拉列表 (来自缓存的历史数据)
         all_codes = sorted(origin_df['代码'].unique())
-        # 创建搜索映射
         code_name_map = {}
-        # 优化：只取每个代码的一行来做映射，加快速度
         unique_stocks = origin_df.drop_duplicates(subset=['代码'])[['代码', '名称']]
         for _, row in unique_stocks.iterrows():
             code_name_map[row['代码']] = f"{row['代码']} | {row['名称']}"
         
-        selected_code_display = st.selectbox(
-            "选择股票", 
-            options=[code_name_map[c] for c in all_codes],
+        # 默认列表
+        options_list = [code_name_map[c] for c in all_codes]
+        
+        # 如果手动输入了有效代码，优先使用
+        selected_code = None
+        selected_name = "未命名"
+        
+        selected_dropdown = st.selectbox(
+            "选择缓存内股票", 
+            options=options_list,
             index=0
         )
-        selected_code = selected_code_display.split(" | ")[0]
-        selected_name = selected_code_display.split(" | ")[1]
+
+        if user_input_code and len(user_input_code.strip()) >= 6:
+            selected_code = user_input_code.strip()
+            # 尝试在 map 里找名字，找不到就用代码
+            # (简化的逻辑，如果需要实时查名需要调API，这里先略过)
+            found_name = None
+            for c, n_str in code_name_map.items():
+                if c == selected_code:
+                     found_name = n_str.split(" | ")[1]
+                     break
+            selected_name = found_name if found_name else selected_code
+            st.caption(f"使用手动输入代码: {selected_code}")
+        else:
+            selected_code = selected_dropdown.split(" | ")[0]
+            selected_name = selected_dropdown.split(" | ")[1]
 
     with col2:
         # 日期范围选择
@@ -80,21 +101,68 @@ def render_stock_analysis_view(origin_df):
             if overlay_index != "None":
                 idx_code = overlay_index.split(" ")[0]
 
+
             for i, d in enumerate(target_dates):
                 d_str = d.strftime("%Y-%m-%d")
                 
                 # 拉取个股
                 df_stock = fetch_cached_min_data(selected_code, d_str, is_index=False, period=DEFAULT_MIN_PERIOD)
                 if df_stock is not None and not df_stock.empty:
-                    # 确保时间列是 datetime
-                    df_stock['time'] = pd.to_datetime(d_str + " " + df_stock['时间'])
+                    # 兼容性处理：检查列名并重命名标准列
+                    # 标准列: time, open, high, low, close, volume
+                    # 旧缓存: time, pct_chg, close (缺 open,high,low,volume)
+                    
+                    # 1. 确保 time 列存在并转换
+                    # 注意：fetch_cached_min_data 不保证列名一定是英文，需要在这里再次做保障或映射
+                    # 但我们在 data_access.py 里已经做了 rename，理论上这里拿到的应该是英文 standard columns
+                    
+                    if 'time' in df_stock.columns:
+                        # 已经是 datetime 或 string
+                        # 如果是 string, 需要 concat date
+                        # Check type of first element
+                        first_val = df_stock['time'].iloc[0]
+                        if isinstance(first_val, str):
+                            # 有些缓存可能只存了 "09:30:00"，需要加上日期
+                            # 但 akshare 返回的是全时间 string "2023-01-01 09:30:00"
+                            if len(first_val) <= 9: # 09:30:00
+                                df_stock['time'] = pd.to_datetime(d_str + " " + df_stock['time'])
+                            else:
+                                df_stock['time'] = pd.to_datetime(df_stock['time'])
+                        else:
+                            # 已经是 timestamp
+                            pass
+                    elif '时间' in df_stock.columns:
+                        df_stock.rename(columns={'时间': 'time'}, inplace=True)
+                        # 处理同上... 略，假设 data_access 已经统一了
+                        pass
+                    
+                    # 2. 补全缺失列 (针对旧缓存)
+                    if 'open' not in df_stock.columns:    df_stock['open'] = df_stock['close']
+                    if 'high' not in df_stock.columns:    df_stock['high'] = df_stock['close']
+                    if 'low' not in df_stock.columns:     df_stock['low'] = df_stock['close']
+                    if 'volume' not in df_stock.columns:  df_stock['volume'] = 0
+                    if '成交量' in df_stock.columns:
+                        df_stock['volume'] = df_stock['成交量']
+
                     stock_data_list.append(df_stock)
                 
                 # 拉取指数 (如果需要)
                 if idx_code:
                     df_index = fetch_cached_min_data(idx_code, d_str, is_index=True, period=DEFAULT_MIN_PERIOD)
                     if df_index is not None and not df_index.empty:
-                        df_index['time'] = pd.to_datetime(d_str + " " + df_index['时间'])
+                        # 同样处理指数的 time
+                        if 'time' in df_index.columns:
+                             first_val = df_index['time'].iloc[0]
+                             if isinstance(first_val, str):
+                                 if len(first_val) <= 9:
+                                     df_index['time'] = pd.to_datetime(d_str + " " + df_index['time'])
+                                 else:
+                                     df_index['time'] = pd.to_datetime(df_index['time'])
+                        
+                        # 补全指数缺失
+                        if 'close' not in df_index.columns and '收盘' in df_index.columns:
+                            df_index['close'] = df_index['收盘']
+                            
                         index_data_list.append(df_index)
                 
                 progress_bar.progress((i + 1) / len(target_dates))
@@ -124,10 +192,10 @@ def render_stock_analysis_view(origin_df):
             # 如果是 Candlestick
             fig.add_trace(go.Candlestick(
                 x=df_full_stock['time'],
-                open=df_full_stock['开盘'],
-                high=df_full_stock['最高'],
-                low=df_full_stock['最低'],
-                close=df_full_stock['收盘'],
+                open=df_full_stock['open'],
+                high=df_full_stock['high'],
+                low=df_full_stock['low'],
+                close=df_full_stock['close'],
                 name=selected_name,
                 increasing_line_color='red', increasing_fillcolor='red',
                 decreasing_line_color='green', decreasing_fillcolor='green'
@@ -135,9 +203,12 @@ def render_stock_analysis_view(origin_df):
 
             # B. 叠加指数 (右轴)
             if not df_full_index.empty:
+                 # 指数一般只看收盘
+                idx_close = df_full_index['close'] if 'close' in df_full_index.columns else df_full_index['收盘']
+                
                 fig.add_trace(go.Scatter(
                     x=df_full_index['time'],
-                    y=df_full_index['收盘'],
+                    y=idx_close,
                     mode='lines',
                     name=f"指数: {idx_code}",
                     line=dict(color='orange', width=1.5),
@@ -145,10 +216,10 @@ def render_stock_analysis_view(origin_df):
                 ), row=1, col=1, secondary_y=True)
 
             # C. 成交量 (Row 2), 区分颜色
-            colors = ['red' if r['收盘'] >= r['开盘'] else 'green' for _, r in df_full_stock.iterrows()]
+            colors = ['red' if r['close'] >= r['open'] else 'green' for _, r in df_full_stock.iterrows()]
             fig.add_trace(go.Bar(
                 x=df_full_stock['time'],
-                y=df_full_stock['成交量'],
+                y=df_full_stock['volume'],
                 name="成交量",
                 marker_color=colors
             ), row=2, col=1)

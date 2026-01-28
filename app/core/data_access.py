@@ -1101,14 +1101,33 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period=DEFAULT_MIN_P
                         logger.info("API ?????????")
                         fetch_cached_min_data.current_backoff = 0
 
-                    if '??' in df.columns:
-                        df.rename(columns={'??': 'time', '??': 'open', '??': 'close'}, inplace=True)
+                    # Rename generic columns based on common AkShare returns
+                    # For stock/index min history, columns are usually: "时间", "开盘", "收盘", "最高", "最低", "成交量", ...
+                    rename_map = {
+                        "时间": "time", "开盘": "open", "收盘": "close", 
+                        "最高": "high", "最低": "low", "成交量": "volume",
+                        "time": "time", "open": "open", "close": "close", "high": "high", "low": "low", "volume": "volume"
+                    }
+                    df.rename(columns=rename_map, inplace=True)
+                    
+                    if 'time' not in df.columns:
+                        # Fallback for weird column names if any
+                        logger.warning("AkShare columns unexpected: %s", df.columns)
+                         # Simple column mapping attempt if positional
+                        if len(df.columns) >= 6:
+                             df.columns = ['time', 'open', 'close', 'high', 'low', 'volume'] + list(df.columns[6:])
 
                     df['time'] = pd.to_datetime(df['time'])
+                    df['open'] = pd.to_numeric(df['open'], errors='coerce')
+                    df['close'] = pd.to_numeric(df['close'], errors='coerce')
+                    df['high'] = pd.to_numeric(df.get('high', df['close']), errors='coerce')
+                    df['low'] = pd.to_numeric(df.get('low', df['close']), errors='coerce')
+                    df['volume'] = pd.to_numeric(df.get('volume', 0), errors='coerce')
+
                     base_price = df['open'].iloc[0]
                     df['pct_chg'] = (df['close'] - base_price) / base_price * 100
 
-                    result = df[['time', 'pct_chg', 'close']].copy()
+                    result = df[['time', 'pct_chg', 'open', 'high', 'low', 'close', 'volume']].copy()
                     _write_min_cache(cache_path, result)
                     return result
                 logger.warning("???????: code=%s date=%s period=%s api=%s", symbol, date_str_norm, period, api_name)
