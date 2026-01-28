@@ -234,11 +234,26 @@ def fetch_biying_stock_list(licence):
         if c in df.columns:
             code_col = c
             break
-    # 优先找简称 (jc)，其次才是 mc (名称)
-    for c in ("jc", "简称", "name", "mc", "名称", "证券简称", "股票名称"):
+            
+    # Refined Name Column Search Strategy (2026-01-29)
+    # 1. 优先匹配明确的中文简称字段 (jc)
+    # 2. 其次匹配明确的中文全称字段 (mc, 名称)
+    # 3. 最后才匹配模糊的字段 (name), 因为 'name' 有时可能是代码或英文
+    candidate_cols = ["jc", "简称", "证券简称", "mc", "名称", "股票名称", "name"]
+    for c in candidate_cols:
         if c in df.columns:
+            # 增加一步校验：如果该列的值全是数字，或者和 code 列完全一样，说明不是合法的名字列，跳过
+            sample_val = str(df[c].iloc[0]) if not df.empty else ""
+            if sample_val.isdigit() and len(sample_val) >= 6:
+                continue
+            if code_col and code_col != c:
+                 # 检查是否和 code 列完全重复 (这通常意味着 name 其实是 code)
+                 if df[c].equals(df[code_col]):
+                     continue
+            
             name_col = c
             break
+            
     if not code_col or not name_col:
         return {}
     df[code_col] = df[code_col].astype(str).str.strip()
