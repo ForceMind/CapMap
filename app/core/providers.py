@@ -257,7 +257,8 @@ def fetch_biying_stock_list(licence):
     if not code_col or not name_col:
         return {}
     df[code_col] = df[code_col].astype(str).str.strip()
-    df[code_col] = df[code_col].str.replace(r"\\..*$", "", regex=True) # remove suffix like .SH
+    # Fix regex to correctly strip suffixes like .SZ, .SH (match dot and everything after)
+    df[code_col] = df[code_col].str.replace(r"\..*$", "", regex=True) 
     df[name_col] = df[name_col].astype(str)
     return dict(zip(df[code_col], df[name_col]))
 

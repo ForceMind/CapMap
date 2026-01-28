@@ -594,12 +594,21 @@ def _refresh_name_map_if_needed(force=False):
              logger.info("Fetching AkShare name list for correction...")
              df_ak = ak.stock_zh_a_spot_em()
              if not df_ak.empty and '代码' in df_ak.columns and '名称' in df_ak.columns:
-                df_ak['代码'] = df_ak['代码'].astype(str)
+                df_ak['代码'] = df_ak['代码'].astype(str).str.strip()
+                # Ensure no suffixes in AkShare codes either
+                df_ak['代码'] = df_ak['代码'].str.replace(r"\..*$", "", regex=True)
                 df_ak['名称'] = df_ak['名称'].astype(str)
                 ak_map = dict(zip(df_ak['代码'], df_ak['名称']))
                 name_map.update(ak_map)
         except Exception as e:
              logger.warning("AkShare名称源调用失败: %s", e)
+
+        # Final Cleanup: Remove any keys with suffixes just in case
+        clean_map = {}
+        for k, v in name_map.items():
+            clean_k = str(k).split('.')[0] # simple split just in case regex failed previously
+            clean_map[clean_k] = v
+        name_map = clean_map
 
         if name_map:
             _save_name_map(name_map)
