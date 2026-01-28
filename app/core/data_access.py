@@ -39,8 +39,8 @@ NAME_REFRESH_TTL_HOURS = 24 * 180
 NAME_REFRESH_MIN_INTERVAL_MINUTES = 30
 NAME_MAP_VERSION = 1
 APP_LOG_FILE = "logs/app.log"
-INTRADAY_WORKERS = int(os.environ.get("INTRADAY_WORKERS", "1"))
-INTRADAY_DELAY_SEC = float(os.environ.get("INTRADAY_DELAY_SEC", "0.5"))
+INTRADAY_WORKERS = int(os.environ.get("INTRADAY_WORKERS", "50"))
+INTRADAY_DELAY_SEC = float(os.environ.get("INTRADAY_DELAY_SEC", "0.05"))
 DEFAULT_MIN_PERIOD = os.environ.get("DEFAULT_MIN_PERIOD", "5")
 AUTO_PREFETCH_ENABLED = os.environ.get("AUTO_PREFETCH_ENABLED", "1") == "1"
 AUTO_PREFETCH_TIME = os.environ.get("AUTO_PREFETCH_TIME", "15:15")
@@ -711,7 +711,7 @@ def refetch_daily_data(date_obj):
                  add_script_run_ctx(threading.current_thread(), ctx)
              return _worker(code)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
             project = {executor.submit(_worker_wrapper, c): c for c in stock_list}
             for future in concurrent.futures.as_completed(project):
                 res = future.result()
@@ -961,7 +961,7 @@ def fetch_history_data():
             return fetch_one_stock(code, name)
 
         logger.info("日线拉取: provider_order=%s 股票数=%s 区间=%s~%s", providers, len(stock_list), start_date_str, end_date_str)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
              future_map = {executor.submit(fetch_one_stock_wrapper, c, stock_names.get(c, c)): c for c in stock_list}
              
              for i, future in enumerate(concurrent.futures.as_completed(future_map)):
@@ -1136,74 +1136,54 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period=DEFAULT_MIN_P
     return None
 def background_prefetch_task(date_list, origin_df):
     """
-    后台线程：执行数据预取。
+    后台线程：执行数据预取 (并发版)。
     """
     total_dates = len(date_list)
-    logger.info("后台任务开始预取 %s 天数据", total_dates)
-    
-    current_backoff = 0 # 秒
+    logger.info("后台任务开始预取 %s 天数据 (并发数: %s)", total_dates, INTRADAY_WORKERS)
     
     indices_codes = ["000300", "000001", "399001"]
     
-    for i, d in enumerate(date_list):
-        d_str = d.strftime("%Y-%m-%d")
-        logger.info("后台任务处理中: %s (%s/%s)", d_str, i + 1, total_dates)
-        
-        # 筛选
-        daily = origin_df[origin_df['日期'].dt.date == d]
-        if daily.empty: continue
-        
-        # Top 25
-        top_stocks = daily.sort_values('成交额', ascending=False).head(25)['代码'].tolist()
-        
-        # 任务列表
-        tasks = []
-        for code in indices_codes: tasks.append((code, d_str, True))
-        for code in top_stocks: tasks.append((code, d_str, False))
-        
-        # 内层逐个执行 (为了方便控制退避，且后台任务不急于一时的并发，稳定第一)
-        # 如果要并发，也必须在并发发生异常时捕获并触发退避。
-        # 简单起见，这里按顺序或小批次执行。
-        
-        for t_code, t_date, t_is_index in tasks:
-            
-            # Indefinite retry loop with backoff
-            while True:
-                try:
-                    # 检查退避
-                    if current_backoff > 0:
-                        logger.info("后台任务冷却中，等待 %s 秒", current_backoff)
-                        time.sleep(current_backoff)
-                        
-                    # 尝试拉取 (fetch_cached_min_data 内部有缓存，如果已存在会直接返回)
-                    # 为了测试 API 连接，如果缓存已存在，其实不会触发网络请求。
-                    # 我们需要假设 fetch_cached_min_data 会处理网络。
-                    # 注意：fetch_cached_min_data 被 @st.cache_data 装饰。
-                    # 在后台线程调用 st.cache_data 装饰的函数通常是没问题的。
-                    
-                    fetch_cached_min_data(t_code, t_date, is_index=t_is_index, period=DEFAULT_MIN_PERIOD)
-                    # 只有当我们需要更多数据时才拉5分钟
-                    # fetch_cached_min_data(t_code, t_date, is_index=t_is_index, period='5') 
-                    
-                    # Success
-                    if current_backoff > 0:
-                        logger.info("后台任务已恢复，重置退避时间")
-                        current_backoff = 0
-                    
-                    # 拉取成功后稍微 sleep 一下避免过于频繁 (0.1s)
-                    time.sleep(0.1)
-                    break # 跳出 while，处理下一个 task
+    # 获取当前上下文
+    ctx = get_script_run_ctx()
 
-                except Exception as e:
-                    logger.warning("后台任务获取失败: code=%s date=%s err=%s", t_code, t_date, e)
-                    # 触发退避机制
-                    if current_backoff == 0:
-                        current_backoff = 60
-                    else:
-                        current_backoff *= 2
-                    
-                    logger.warning("后台任务退避时间增加到 %s 秒，重试同一任务", current_backoff)
-                    # Loop continues, will sleep at start of next iteration
+    def _fetch_one(args):
+        t_code, t_date, t_is_index = args
+        try:
+           fetch_cached_min_data(t_code, t_date, is_index=t_is_index, period=DEFAULT_MIN_PERIOD)
+        except Exception as e:
+           logger.warning("后台任务获取失败: code=%s date=%s err=%s", t_code, t_date, e)
+
+    def _worker_wrapper(args):
+        if ctx:
+             add_script_run_ctx(threading.current_thread(), ctx)
+        _fetch_one(args)
+
+    # 全局线程池
+    with concurrent.futures.ThreadPoolExecutor(max_workers=INTRADAY_WORKERS) as executor:
+        for i, d in enumerate(date_list):
+            d_str = d.strftime("%Y-%m-%d")
+            logger.info("后台任务处理中: %s (%s/%s)", d_str, i + 1, total_dates)
+            
+            # 筛选
+            daily = origin_df[origin_df['日期'].dt.date == d]
+            if daily.empty: continue
+            
+            # Top 25
+            top_stocks = daily.sort_values('成交额', ascending=False).head(25)['代码'].tolist()
+            
+            # 任务列表
+            tasks = []
+            for code in indices_codes: tasks.append((code, d_str, True))
+            for code in top_stocks: tasks.append((code, d_str, False))
+            
+            # 提交当前日期的所有任务
+            futures = [executor.submit(_worker_wrapper, task) for task in tasks]
+            
+            # 等待当前日期完成，再进行下一天 (便于进度跟踪)
+            concurrent.futures.wait(futures)
+            
+            # 极短休眠
+            time.sleep(0.01)
     
     logger.info("后台任务已完成")
 

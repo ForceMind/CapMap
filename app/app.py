@@ -154,7 +154,8 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🛠️ 板块过滤")
     filter_cyb = st.checkbox("屏蔽创业板 (300开头)", value=False)
-    filter_kcb = st.checkbox("屏蔽科创板 (688开头)", value=False)
+    # 默认勾选屏蔽科创板，因为其波动较大，可能影响整体热力图观感
+    filter_kcb = st.checkbox("屏蔽科创板 (688开头)", value=True)
     filter_state = (filter_cyb, filter_kcb)
     if st.session_state.get("filter_state") != filter_state:
         st.session_state["filter_state"] = filter_state
@@ -185,8 +186,9 @@ with st.sidebar:
         log_action("功能导航切换", nav=nav_option)
     
     with st.expander("📥 后台数据预取", expanded=False):
-        st.caption("后台静默下载最近 N 天分时数据")
-        prefetch_days = st.number_input("预取天数", min_value=5, max_value=200, value=30, step=10)
+        st.caption("后台静默下载过去分时数据 (5分钟K线)")
+        st.info("💡 使用商用接口时，可以设置较大的预取天数以覆盖所有历史。推荐设置为 3650 (10年) 以初始化全量分时数据。")
+        prefetch_days = st.number_input("预取天数", min_value=5, max_value=5000, value=365, step=10)
         
         if bg_thread and bg_thread.is_alive():
             st.info(f"🟢 后台任务运行中...\n请关注控制台(Console)日志")

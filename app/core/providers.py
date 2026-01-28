@@ -18,37 +18,39 @@ BIYING_QUOTA_FILE = "data/biying_quota.json"
 BIYING_DAILY_LIMIT = 99999999999
 
 def _check_and_consume_quota():
-    try:
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        data = {"date": today_str, "count": 0}
-        
-        if os.path.exists(BIYING_QUOTA_FILE):
-            try:
-                with open(BIYING_QUOTA_FILE, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                    if isinstance(loaded, dict) and loaded.get("date") == today_str:
-                        data = loaded
-            except Exception:
-                pass
+    # 商用版不限次数，直接返回 True
+    return True, 0
+    
+    # try:
 
-        if data["count"] >= BIYING_DAILY_LIMIT:
-             return False, data["count"]
-
-        data["count"] += 1
+    #    today_str = datetime.now().strftime("%Y-%m-%d")
+    #   data = {"date": today_str, "count": 0}
         
-        try:
-            os.makedirs(os.path.dirname(BIYING_QUOTA_FILE), exist_ok=True)
-            with open(BIYING_QUOTA_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f)
-        except Exception:
-            pass
-            
-        return True, data["count"]
-    except Exception as e:
-        LOGGER.warning(f"Quota check failed: {e}")
+    #    if os.path.exists(BIYING_QUOTA_FILE):
+    #          with open(BIYING_QUOTA_FILE, "r", encoding="utf-8") as f:
+    #                loaded = json.load(f)
+    #                if isinstance(loaded, dict) and loaded.get("date") == today_str:
+    #                    data = loaded
+    #       except Exception:
+    #            pass
+
+    #    if data["count"] >= BIYING_DAILY_LIMIT:
+    #         return False, data["count"]
+
+    #   data["count"] += 1
+        
+    #  try:
+    #     os.makedirs(os.path.dirname(BIYING_QUOTA_FILE), exist_ok=True)
+    #    with open(BIYING_QUOTA_FILE, "w", encoding="utf-8") as f:
+    #            json.dump(data, f)
+    #   except Exception:
+    #       pass
+    #       
+    #   return True, data["count"]
+    #except Exception as e:
+    #   LOGGER.warning(f"Quota check failed: {e}")
         # If quota check fails, assume allowed but don't crash
-        return True, 0
-
+    #    return True, 0
 
 
 def _read_json_file(path):
