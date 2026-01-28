@@ -41,11 +41,13 @@ from core.data_access import (
     _start_auto_prefetch_if_needed,
     _start_manual_prefetch,
 )
-from ui.history_view import render_history_view
-from ui.data_manager_view import render_data_manager
-from ui.divergence_view import render_divergence_view
-from ui.stock_analysis_view import render_stock_analysis_view
+from app.ui.history_view import render_history_view
+from app.ui.data_manager_view import render_data_manager
+from app.ui.divergence_view import render_divergence_view
+from app.ui.stock_analysis_view import render_stock_analysis_view
+from app.ui.market_overview import render_market_overview  # 新增
 
+NAV_OVERVIEW = "🔍 市场概览 (Market Overview)"
 NAV_HISTORY = "⏪ 历史盘面回放"
 NAV_STOCK = "📈 个股多日分析"
 NAV_DIVERGENCE = "🌊 资金偏离分析"
@@ -193,7 +195,7 @@ with st.sidebar:
     st.markdown("---")
     
     # 导航栏
-    nav_option = st.radio("📡 功能导航", [NAV_HISTORY, NAV_STOCK, NAV_DIVERGENCE, NAV_MANAGER], index=0)
+    nav_option = st.radio("📡 功能导航", [NAV_OVERVIEW, NAV_HISTORY, NAV_STOCK, NAV_DIVERGENCE, NAV_MANAGER], index=0)
     prev_nav = st.session_state.get("nav_option_prev")
     if prev_nav != nav_option:
         st.session_state["nav_option_prev"] = nav_option
@@ -245,7 +247,10 @@ if not origin_df.empty:
     # --- 时间选择器逻辑 (Session State 管理) ---
     available_dates = sorted(df['日期'].dt.date.unique())
     
-    if nav_option == NAV_HISTORY:
+    if nav_option == NAV_OVERVIEW:
+        render_market_overview(origin_df)
+
+    elif nav_option == NAV_HISTORY:
         render_history_view(df, available_dates)
     
     elif nav_option == NAV_STOCK:

@@ -11,7 +11,10 @@ from core.data_access import (
 )
 
 def render_stock_analysis_view(origin_df):
-    st.subheader("📈 个股多日走势叠加分析")
+    st.subheader("📈 个股多日走势 & 历史分析")
+    
+    # --- 0. 准备历史日线背景数据 (用于技术分析) ---
+    # 如果用户查询了某只股票，我们可以先展示在这两年数据中的走势图（日线）
     
     # 获取全市场股票及搜索支持
     all_stocks_df = get_all_stocks_list() # columns: code, name, pinyin
@@ -138,6 +141,63 @@ def render_stock_analysis_view(origin_df):
         do_search = st.button("📊 生成图表", type="primary", use_container_width=True)
 
     # --- 2. 主逻辑 ---
+    if selected_code:
+        # A. 展示 2年日线背景 (Day Level)
+        # 从 origin_df 过滤该股票的所有历史数据
+        stock_daily_df = origin_df[origin_df['代码'] == selected_code].sort_values('日期')
+        
+        if not stock_daily_df.empty:
+            with st.expander(f"📊 {selected_name} ({selected_code}) 近两年日线概览 & 技术指标", expanded=True):
+                # 计算 MA 和 ATR
+                stock_daily_df['MA20'] = stock_daily_df['收盘'].rolling(window=20).mean()
+                stock_daily_df['MA60'] = stock_daily_df['收盘'].rolling(window=60).mean()
+                stock_daily_df['MA250'] = stock_daily_df['收盘'].rolling(window=250).mean()
+                
+                # ATR 计算
+                high_low = stock_daily_df['最高'] - stock_daily_df['最低']
+                high_close = (stock_daily_df['最高'] - stock_daily_df['收盘'].shift()).abs()
+                low_close = (stock_daily_df['最低'] - stock_daily_df['收盘'].shift()).abs()
+                tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+                stock_daily_df['ATR20'] = tr.rolling(window=20).mean()
+                
+                # 绘制日线图
+                fig_daily = go.Figure()
+                
+                # K线
+                fig_daily.add_trace(go.Candlestick(
+                    x=stock_daily_df['日期'],
+                    open=stock_daily_df['开盘'], high=stock_daily_df['最高'],
+                    low=stock_daily_df['最低'], close=stock_daily_df['收盘'],
+                    name='日K线'
+                ))
+                
+                # 均线
+                fig_daily.add_trace(go.Scatter(x=stock_daily_df['日期'], y=stock_daily_df['MA20'], mode='lines', line=dict(color='orange', width=1), name='MA20'))
+                fig_daily.add_trace(go.Scatter(x=stock_daily_df['日期'], y=stock_daily_df['MA60'], mode='lines', line=dict(color='blue', width=1), name='MA60'))
+                fig_daily.add_trace(go.Scatter(x=stock_daily_df['日期'], y=stock_daily_df['MA250'], mode='lines', line=dict(color='purple', width=2), name='MA250 (牛熊线)'))
+                
+                fig_daily.update_layout(
+                    title=f"{selected_name} 日线趋势 (含MA250)",
+                    xaxis_rangeslider_visible=False,
+                    height=400,
+                    margin=dict(l=20, r=20, t=40, b=20)
+                )
+                st.plotly_chart(fig_daily, use_container_width=True)
+                
+                # ATR 指标卡
+                last_row = stock_daily_df.iloc[-1]
+                atr_val = last_row['ATR20']
+                price = last_row['收盘']
+                atr_pct = (atr_val / price) * 100 if price > 0 else 0
+                
+                cols = st.columns(4)
+                cols[0].metric("当前价格", f"{price:.2f}")
+                cols[1].metric("MA250", f"{last_row['MA250']:.2f}" if pd.notnull(last_row['MA250']) else "N/A")
+                cols[2].metric("ATR (20日波动)", f"{atr_val:.3f}")
+                cols[3].metric("ATR占比 (波动率)", f"{atr_pct:.2f}%")
+        else:
+             st.info(f"暂无 {selected_code} 的本地日线缓存数据（可能是新股或未在初始化列表中）。")
+
     if do_search and len(date_range) == 2:
         start_date, end_date = date_range
         # 筛选日期范围内的valid dates
