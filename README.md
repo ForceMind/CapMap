@@ -5,6 +5,8 @@
 
 ## 一键部署
 1) 上传本目录到服务器。
+git clone -b Sever https://gh-proxy.org/https://github.com/ForceMind/CapMap.git
+cd CapMap
 2) 运行：
    ```bash
    chmod +x deploy.sh

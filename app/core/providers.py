@@ -160,28 +160,34 @@ def _fetch_biying_json(url, timeout=20):
         LOGGER.warning(f"Biying daily quota reached ({count}/{BIYING_DAILY_LIMIT}). Switching to fallback.")
         return None
 
+    LOGGER.info(f"Biying REQ: {url}") # Log Request
+
     retries = 3
     for i in range(retries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "capmap/1.0"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
+                status_code = resp.getcode()
                 payload = resp.read()
+                LOGGER.info(f"Biying RES: Status={status_code} Size={len(payload)}B URL={url}") # Log Response
+
             try:
                 return json.loads(payload.decode("utf-8"))
             except Exception:
                 try:
                     return json.loads(payload)
                 except Exception:
+                    LOGGER.error(f"Biying JSON Parse Error. Payload[:50]: {payload[:50]}")
                     return None
         except urllib.error.HTTPError as e:
+            LOGGER.error(f"Biying RES: HTTP {e.code} {e.reason} for {url}")
             if e.code == 429:
                 LOGGER.warning(f"Biying API 429 Limit reached, retrying {i+1}/{retries} after sleep...")
                 time.sleep(2 * (i + 1))
                 continue
-            LOGGER.warning(f"Biying API HTTP Error {e.code}: {e.reason}")
             return None
         except Exception as e:
-            LOGGER.warning(f"Biying API request failed: {e}")
+            LOGGER.error(f"Biying RES: Network/Other Error: {type(e).__name__}: {e} for URL: {url}")
             return None
     return None
 
