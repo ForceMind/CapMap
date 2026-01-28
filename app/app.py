@@ -66,6 +66,17 @@ st.markdown("""
 # 侧边栏
 with st.sidebar:
     st.header("⚙️ 数据管理")
+
+    # 指数池选择 (优先显示，以便加载数据)
+    target_pool = st.selectbox(
+        "🎯 分析对象池", 
+        ["000300 | 沪深300 (大盘)", "000905 | 中证500 (中盘, 剔除300)", "000852 | 中证1000 (小盘, 剔除300+500)"],
+        index=0,
+        help="切换不同的股票池进行分层分析。注意：切换后需要重新拉取数据，可能需要一点时间。"
+    )
+    # Extract code
+    pool_code = target_pool.split(" | ")[0]
+    st.session_state["index_pool_code"] = pool_code
     
     with st.expander("数据刷新与维护", expanded=True):
         st.write("如果数据显示不正确，请尝试以下操作：")
@@ -165,7 +176,8 @@ with st.sidebar:
     
 # 加载数据
 with st.spinner("正在初始化历史数据仓库..."):
-    origin_df = fetch_history_data()
+    pool_code = st.session_state.get("index_pool_code", "000300")
+    origin_df = fetch_history_data(pool_code)
     _start_auto_prefetch_if_needed(origin_df)
 
 # --- 后台任务检测与控制 ---
@@ -187,6 +199,8 @@ with st.sidebar:
         st.session_state["nav_option_prev"] = nav_option
         log_action("功能导航切换", nav=nav_option)
     
+    # (指数池选择已移至顶部)
+
     with st.expander("📥 后台数据预取", expanded=False):
         st.caption("后台静默下载过去分时数据 (5分钟K线)")
         st.info("💡 使用商用接口时，可以设置较大的预取天数以覆盖所有历史。推荐设置为 3650 (10年) 以初始化全量分时数据。")

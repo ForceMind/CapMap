@@ -208,11 +208,16 @@ def _extract_biying_rows(payload):
 def fetch_biying_stock_list(licence):
     if not licence:
         return {}
+    # 尝试多个可能的 stock list 接口
+    # 1. /hslt/list/ (A股列表)
     url = _build_biying_url(f"/hslt/list/{urllib.parse.quote(licence)}")
     payload = _fetch_biying_json(url)
     rows = _extract_biying_rows(payload)
+    
     if not rows:
+        # Fallback?
         return {}
+
     df = pd.DataFrame(rows)
     code_col = None
     name_col = None
@@ -227,9 +232,51 @@ def fetch_biying_stock_list(licence):
     if not code_col or not name_col:
         return {}
     df[code_col] = df[code_col].astype(str).str.strip()
-    df[code_col] = df[code_col].str.replace(r"\\..*$", "", regex=True)
+    df[code_col] = df[code_col].str.replace(r"\\..*$", "", regex=True) # remove suffix like .SH
     df[name_col] = df[name_col].astype(str)
     return dict(zip(df[code_col], df[name_col]))
+
+
+def fetch_biying_index_cons(index_code, licence):
+    """获取指数成分股列表"""
+    if not licence:
+        return []
+    
+    # 尝试多个路径
+    # 1. /zscons/000300/licence (假设)
+    # 2. /hsindex/cons/000300/licence
+    
+    paths_to_try = [
+        f"/zscons/{index_code}/{urllib.parse.quote(licence)}",
+        f"/hsindex/cons/{index_code}/{urllib.parse.quote(licence)}"
+    ]
+    
+    rows = []
+    for path in paths_to_try:
+        try:
+            url = _build_biying_url(path)
+            payload = _fetch_biying_json(url)
+            rows = _extract_biying_rows(payload)
+            if rows:
+                break
+        except:
+            pass
+            
+    cons = []
+    for row in rows:
+        # 寻找代码字段
+        code = None
+        for k in ["dm", "code", "symbol", "ts_code"]:
+            if k in row:
+                code = str(row[k])
+                break
+        if code:
+            # 清理后缀
+            if "." in code:
+                code = code.split(".")[0]
+            cons.append(code)
+    return cons
+
 
 
 def _fetch_biying_history_raw(symbol, start_date, end_date, period, licence, is_index=False, adj="n"):

@@ -19,6 +19,7 @@ from core.providers import (
     fetch_biying_daily,
     fetch_biying_intraday,
     fetch_biying_stock_list,
+    fetch_biying_index_cons, # Add this
     get_biying_licence,
     get_provider_order,
 )
@@ -57,18 +58,72 @@ def get_all_stocks_list(force_update=False):
         except Exception as e:
             logging.error(f"Error reading stock list cache: {e}")
     
-    # Fetch from AkShare
+    # ---------------------------------------------------------
+    # 优先尝试从 Biying 拉取 (User Request: Prioritize Biying)
+    # ---------------------------------------------------------
+    status_msg = st.empty() if 'st' in globals() else None
+    
+    try:
+        if status_msg: status_msg.info("⏳ 正在从必盈(Biying)同步全市场股票列表...")
+        licence = get_biying_licence()
+        by_stocks_map = fetch_biying_stock_list(licence)
+        
+        if by_stocks_map:
+            logging.info(f"Fetched {len(by_stocks_map)} stocks from Biying.")
+            df = pd.DataFrame(list(by_stocks_map.items()), columns=['code', 'name'])
+            
+            # Pinyin generation
+            if status_msg: status_msg.info("⏳ 正在生成拼音索引...")
+            def get_pinyin_first_letters(text):
+                try:
+                    if not isinstance(text, str): return ""
+                    return "".join([p[0].upper() for p in lazy_pinyin(text) if p])
+                except:
+                    return ""
+            df['pinyin'] = df['name'].apply(get_pinyin_first_letters)
+            
+            # Save
+            if not os.path.exists("data"):
+                os.makedirs("data")
+            df.to_csv(ALL_STOCKS_CACHE_FILE, index=False)
+            
+            if status_msg:
+                status_msg.success(f"✅ 股票列表已更新(Biying源) (共 {len(df)} 只)")
+                time.sleep(1)
+                status_msg.empty()
+            return df
+        else:
+            if status_msg: status_msg.warning("⚠️ 必盈接口返回空，尝试 AkShare 备用...")
+            logging.warning("Biying stock list returned empty.")
+            
+    except Exception as e:
+        logging.error(f"Biying fetch failed: {e}")
+        if status_msg: status_msg.error(f"Biying List Error: {e}")
+
+    # ---------------------------------------------------------
+    # Fallback to AkShare (Old Logic)
+    # ---------------------------------------------------------
     try:
         # 使用 st.spinner 如果在 streamlit 环境下
         status_msg = st.empty()
-        status_msg.info("⏳ 正在从 AkShare 同步全市场股票列表，请稍候...")
+        status_msg.info("⏳ 正在从 AkShare 同步全市场股票列表 (尝试接口1)...")
         logging.info("Fetching all stocks from AkShare...")
         
-        df = ak.stock_zh_a_spot_em()
-        # akshare 返回: 序号, 代码, 名称, 最新价, ...
-        # 我们只要 代码, 名称
-        df = df[['代码', '名称']].rename(columns={'代码': 'code', '名称': 'name'})
-        
+        df = None
+        # 尝试使用 stock_zh_a_spot_em (实时行情接口，数据最全但可能不稳定)
+        try:
+            df = ak.stock_zh_a_spot_em()
+            df = df[['代码', '名称']].rename(columns={'代码': 'code', '名称': 'name'})
+        except Exception as e1:
+            logging.warning(f"Interface 1 (spot) failed: {e1}. Trying fallback...")
+            status_msg.info("⏳ 接口1超时，尝试接口2 (stock_info_a_code_name)...")
+            # 备用接口: stock_info_a_code_name (仅代码和名称，更轻量)
+            df = ak.stock_info_a_code_name()
+            df = df.rename(columns={'code': 'code', 'name': 'name'}) # 确保列名一致
+
+        if df is None or df.empty:
+            raise Exception("所有 AkShare 接口均未返回有效数据。")
+
         status_msg.info("⏳ 正在生成拼音索引...")
         # Generate Pinyin
         def get_pinyin_first_letters(text):
@@ -98,7 +153,7 @@ def get_all_stocks_list(force_update=False):
         
         # 如果下载失败，尝试读取旧缓存即使过期
         if os.path.exists(ALL_STOCKS_CACHE_FILE):
-             st.toast("⚠️ 使用过期缓存列表")
+             st.toast("⚠️ 网络错误，本次将使用旧缓存列表")
              return pd.read_csv(ALL_STOCKS_CACHE_FILE, dtype={'code': str})
         return pd.DataFrame(columns=['code', 'name', 'pinyin'])
 
@@ -820,55 +875,54 @@ def get_start_date(years_back=2):
     target = datetime.now() - timedelta(days=365 * years_back)
     return target.strftime("%Y%m%d")
 
-def fetch_history_data():
+def fetch_history_data(index_pool="000300"):
     """
-    获取沪深300成分股过去2年的日线数据。
-    增量更新逻辑：
-    1. 尝试读取本地缓存。
-    2. 如果有缓存，检查缓存中最新的日期。
-    3. 如果 最新日期 < 昨天 (或今天收盘后)，则只下载增量数据（为了简单可靠，AkShare日线接口通常是按段下载，或者全量下载）。
-       * 修正策略：由于 ak.stock_zh_a_hist 接口参数是 start_date 和 end_date，
-         我们可以只下载 [缓存最新日期+1, 今天] 的数据，然后 append 到缓存中。
+    获取成分股历史数据。支持不同指数池切换。
+    index_pool: "000300" (沪深300), "000905" (中证500), "000852" (中证1000)
     """
-    logger.info("开始加载历史数据")
+    # 映射文件与名称
+    pool_meta = {
+        "000300": {"name": "csi300", "desc": "沪深300"},
+        "000905": {"name": "csi500", "desc": "中证500"},
+        "000852": {"name": "csi1000", "desc": "中证1000"}
+    }
+    meta = pool_meta.get(index_pool, pool_meta["000300"])
+    file_key = meta["name"]
+    pool_desc = meta["desc"]
+    
+    current_cache_file = f"data/{file_key}_history_cache.parquet"
+    
+    logger.info(f"开始加载历史数据 Pool={index_pool} ({pool_desc})")
+    
+    # 确保 data 目录存在
+    if not os.path.exists("data"):
+        os.makedirs("data")
+        
     cached_df = pd.DataFrame()
     last_cached_date = None
-    logger.info("已加载本地缓存，最新日期=%s", last_cached_date)
+    
     providers = get_provider_order()
     licence = get_biying_licence()
 
     # 1. 尝试加载本地缓存
-    if os.path.exists(CACHE_FILE):
+    if os.path.exists(current_cache_file):
         try:
-            cached_df = pd.read_parquet(CACHE_FILE)
+            cached_df = pd.read_parquet(current_cache_file)
             if not cached_df.empty:
                 last_cached_date = cached_df['日期'].max().date()
-                # 区分提示，避免误导用户以为个股分时数据也加载完了
-                st.toast(f"✅ 日线行情已就绪: {last_cached_date}")
+                st.toast(f"✅ [{pool_desc}] 日线行情已就绪: {last_cached_date}")
         except Exception as e:
-            st.error(f"读取缓存文件失败: {e}")
+            st.error(f"读取[{pool_desc}]缓存失败: {e}")
 
     # 2. 计算需要下载的时间范围
     today = datetime.now().date()
     
-    # 如果缓存里的日期已经是今天，且现在是盘中，可能用户想刷新
-    # 但简单起见，我们设定：如果缓存最新日期 < 今天，肯定要尝试下载。
-    # 如果缓存最新日期 == 今天，只有当强制刷新时才通过(外部控制)，这里函数内部先假设"已是最新"
-    # 但为了支持盘中刷新，如果 last_cached_date == today，我们其实可以重拉今天的。
-    # 这里我们只处理 last_cached_date < today 的自动增量, 或者 force refresh (caller clears cache)
-    
     if last_cached_date:
         if last_cached_date >= today:
-             # 如果已经有今天的数据，暂时直接返回 (用户需点击强制刷新来更新今日盘中数据)
-             # 但为了能够"自动"拉取盘中，如果 last_cached_date == today，我们做个判断？
-             # 现在的逻辑是：如果缓存文件存在且日期>=今天，就不动了。
-             # 这导致如果早上9点跑了一次（有数据），下午3点再跑，还是旧的。
-             # 改进：如果是今天，且现在还没收盘，或者刚收盘，允许覆盖？
-             # 暂保留原逻辑防止频繁请求，依靠 "强制刷新" 按钮来清空缓存。
              return _refresh_cached_names(cached_df)
-        
         start_date_str = (last_cached_date + timedelta(days=1)).strftime("%Y%m%d")
     else:
+        # 如果是首次下载，默认下载2年
         start_date_str = get_start_date(2)
         
     end_date_str = today.strftime("%Y%m%d")
@@ -877,224 +931,174 @@ def fetch_history_data():
     if start_date_str > end_date_str:
         return _refresh_cached_names(cached_df)
 
-    # 状态容器
+    # -------------------------------------------------------------------------
+    # 开始下载更新流程
+    # -------------------------------------------------------------------------
     status_text = st.empty()
+    status_text.info(f"⏳ 正在更新 {pool_desc} 成分股数据 ({start_date_str}-{end_date_str})...")
     progress_bar = st.progress(0)
     
     try:
-        # 如果是增量更新
-        is_incremental = not cached_df.empty
-        if not is_incremental:
-            status_text.text("正在初始化全量历史数据...")
-        else:
-            status_text.text(f"正在检查增量数据 ({start_date_str} - {end_date_str})...")
-
-        # 获取成分股列表
-        cons_df = None
-        for attempt in range(3):
+        # A. 获取成分股列表 (优先 Biying, 其次 Biying Stock List 过滤? 不推荐, 再次 AkShare)
+        cons_codes = []
+        
+        # 1. Biying Interface (Requires implementation in providers.py)
+        if licence:
+            from core.providers import fetch_biying_index_cons
+            # 注意: Biying 的指数代码可能不一样, 但通用标准是一样的
             try:
-                logger.info(f"AKShare 获取成分股列表: 000300 (尝试 {attempt+1}/3)")
-                cons_df = ak.index_stock_cons(symbol="000300")
-                if cons_df is not None and not cons_df.empty:
-                    logger.info("成分股列表获取成功: rows=%s", len(cons_df))
-                    break
+                cons_codes = fetch_biying_index_cons(index_pool, licence)
             except Exception as e:
-                logger.warning(f"成分股列表获取失败 (attempt {attempt+1}): {e}")
-                time.sleep(2)
-        
-        if cons_df is None or cons_df.empty:
-            if not cached_df.empty:
-                logger.warning("成分股列表完全获取失败，降级使用缓存中的现有代码")
-                st.warning("⚠️ 无法连接到交易所获取最新成分股，仅使用本地缓存中的现有股票。")
-                return _refresh_cached_names(cached_df)
-            else:
-                logger.error("成分股列表获取失败且无本地缓存，无法初始化。")
-                st.error("❌ 初始化失败：无法获取沪深300成分股列表。请检查网络连接或稍后重试。")
-                return pd.DataFrame()
+                logger.warning(f"Biying index cons err: {e}")
 
-        if 'variety' in cons_df.columns:
-            code_col, name_col = 'variety', 'name'
-        elif '品种代码' in cons_df.columns:
-            code_col, name_col = '品种代码', '品种名称'
-        else:
-            code_col = cons_df.columns[0]
-            name_col = cons_df.columns[1]
+        # 2. AkShare Fallback (If Biying failed or empty)
+        if not cons_codes:
+            msg = f"正在尝试从 AkShare 获取 {pool_desc} 成分股..."
+            if licence: msg += " (Biying获取为空)"
+            st.write(msg)
             
-        stock_list = cons_df[code_col].tolist()
-        stock_names = dict(zip(cons_df[code_col], cons_df[name_col]))
+            try:
+                # AkShare 接口: index_stock_cons
+                cons_df = ak.index_stock_cons(symbol=index_pool)
+                cons_codes = cons_df['variety'].tolist()
+            except Exception as e:
+                logger.warning(f"AkShare index cons failed: {e}")
         
-        # Update name map (refresh cadence)
-        name_map = _refresh_name_map_if_needed()
-        if name_map:
-            stock_names.update(name_map)
+        # 3. Last resort fallback / check
+        if not cons_codes:
+             st.error(f"❌ 无法获取 {pool_desc} 成分股列表，请检查网络或配置。")
+             return _refresh_cached_names(cached_df)
 
-        new_data_list = []
-        total_stocks = len(stock_list)
+        # Filter valid codes
+        cons_codes = [c for c in cons_codes if str(c).isdigit() and len(str(c))==6]
+        logger.info(f"Target Cons Count: {len(cons_codes)}")
+
+        # B. 并发下载日线
+        new_dfs = []
+        total_stocks = len(cons_codes)
+        max_workers = 30 if licence else 5
         
-        # --- 尝试获取今日实时数据 (Spot) 作为补充 ---
-        # 很多时候 stock_zh_a_hist 在盘中不返回当日数据，或者有些源不返回。
-        # 我们可以拉取 ak.stock_zh_a_spot_em() 获取所有A股实时行情，然后过滤出 CSI300
-        # 仅当我们需要 "今天" 的数据时 (start_date_str <= today_str)
-        today_spot_map = {}
-        has_today_hist = False # 标记是否通过 hist 接口拿到了今天数据
-        
-        if "akshare" in providers and end_date_str >= start_date_str:
-             try:
-                 logger.info("AKShare 获取实时行情，用于补齐今日数据")
-                 logger.info("调用接口: stock_zh_a_spot_em")
-                 spot_df = ak.stock_zh_a_spot_em()
-                 if spot_df is not None and not spot_df.empty:
-                     # spot_df columns: 代码, 名称, 最新价, 涨跌幅, 成交额 ...
-                     # 建立映射: code -> row
-                     spot_df['代码'] = spot_df['代码'].astype(str)
-                     today_spot_map = spot_df.set_index('代码').to_dict('index')
-             except Exception as e:
-                 logger.warning("实时数据拉取失败: %s", e)
-
-        # 循环获取历史
-        # 使用 ThreadPoolExecutor 加速增量历史下载 (如果需要下载很多天)
-        # 但 akshare 接口频繁调用可能受限，适度并发
-        
-        def fetch_one_stock(code, name):
-            for provider in providers:
-                if provider == "biying":
-                    if not licence:
-                        continue
-                    try:
-                        df_hist = fetch_biying_daily(code, start_date_str, end_date_str, licence, is_index=False, period="d")
-                        if df_hist is not None and not df_hist.empty:
-                            df_hist = df_hist.copy()
-                            df_hist['代码'] = code
-                            df_hist['名称'] = name
-                            return df_hist
-                    except Exception as e:
-                        logger.warning("必盈异常: code=%s err=%s", code, e)
-                elif provider == "akshare":
-                    try:
-                        # AkShare 拉取
-                        logger.info("AkShare: stock_zh_a_hist code=%s start=%s end=%s", code, start_date_str, end_date_str)
-                        df_hist = ak.stock_zh_a_hist(symbol=code, start_date=start_date_str, end_date=end_date_str, adjust="qfq")
-                        
-                        # 检查今日数据是否获取到
-                        fetched_today = False
-                        if df_hist is not None and not df_hist.empty:
-                            logger.info("获取成功: code=%s rows=%s", code, len(df_hist))
-                            df_hist['日期'] = pd.to_datetime(df_hist['日期'])
-                            if end_date_str in df_hist['日期'].dt.strftime("%Y%m%d").values:
-                                fetched_today = True
-                        else:
-                            logger.warning("获取为空: code=%s", code)
-                            df_hist = pd.DataFrame()
-
-                        # 尝试补齐今日盘中数据
-                        if (not fetched_today) and (end_date_str == datetime.now().strftime("%Y%m%d")):
-                            if code in today_spot_map:
-                                row = today_spot_map[code]
-                                try:
-                                    new_row = pd.DataFrame([{
-                                        '日期': pd.to_datetime(end_date_str),
-                                        '收盘': row['最新价'],
-                                        '涨跌幅': row['涨跌幅'],
-                                        '成交额': row['成交额'],
-                                        '代码': code,
-                                        '名称': name
-                                    }])
-                                    df_hist = pd.concat([df_hist, new_row], ignore_index=True)
-                                except Exception:
-                                    pass
-
-                        if df_hist is not None and not df_hist.empty:
-                            # 确保列名正确
-                            if '日期' not in df_hist.columns:
-                                return None
-                            cols_needed = ['日期', '收盘', '涨跌幅', '成交额']
-                            for c in cols_needed:
-                                if c not in df_hist.columns:
-                                    return None
-
-                            df_hist = df_hist[cols_needed].copy()
-                            df_hist['代码'] = code
-                            df_hist['名称'] = name
-                            return df_hist
-                    except Exception as e:
-                        logger.warning("AkShare异常: code=%s err=%s", code, e)
-            return None
         ctx = get_script_run_ctx()
-        def fetch_one_stock_wrapper(code, name):
+        
+        def _fetch_stock_daily(code):
             if ctx:
-                add_script_run_ctx(threading.current_thread(), ctx)
-            return fetch_one_stock(code, name)
-
-        logger.info("日线拉取: provider_order=%s 股票数=%s 区间=%s~%s", providers, len(stock_list), start_date_str, end_date_str)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
-             future_map = {executor.submit(fetch_one_stock_wrapper, c, stock_names.get(c, c)): c for c in stock_list}
-             
-             for i, future in enumerate(concurrent.futures.as_completed(future_map)):
-                 # Update progress
-                 if i % 10 == 0:
-                     progress_bar.progress((i + 1) / total_stocks)
-                     status_text.text(f"正在同步数据: {i+1}/{total_stocks}")
-                 
-                 res = future.result()
-                 if res is not None:
-                     new_data_list.append(res)
+                add_script_run_ctx(threading.current_thread(), ctx) # Attach context
                 
-        status_text.empty()
+            # 1. Try Biying (Priority)
+            if licence:
+                from core.providers import _fetch_biying_history_raw
+                # Biying history raw returns list of dicts or rows
+                try:
+                    rows = _fetch_biying_history_raw(code, start_date_str, end_date_str, "daily", licence, adj="qfq")
+                    if rows:
+                        _df = pd.DataFrame(rows)
+                        # Map columns based on observed keys from Biying documentation or typical structure
+                        # Usually: d(date), o(open), c(close), h(high), l(low), v(vol), e(amount), zf(change pct)
+                        
+                        rename_map = {}
+                        if 'd' in _df.columns: rename_map['d'] = '日期'
+                        if 'c' in _df.columns: rename_map['c'] = '收盘'
+                        if 'e' in _df.columns: rename_map['e'] = '成交额'
+                        if 'zf' in _df.columns: rename_map['zf'] = '涨跌幅' # Percentage
+                        
+                        # Fallback for keys if different
+                        if not rename_map and 'date' in _df.columns:
+                             rename_map = {'date': '日期', 'close': '收盘', 'amount': '成交额', 'pct_chg': '涨跌幅'}
+
+                        if '日期' in rename_map.values() or 'd' in _df.columns:
+                            _df = _df.rename(columns=rename_map)
+                            # Ensure columns exist
+                            if '收盘' in _df.columns:
+                                _df['代码'] = code
+                                _df['日期'] = pd.to_datetime(_df['日期'])
+                                # Fill missing cols
+                                for col in ['涨跌幅', '成交额']:
+                                    if col not in _df.columns: _df[col] = 0.0
+                                return _df[['日期', '收盘', '涨跌幅', '成交额', '代码']]
+                except Exception as e:
+                    pass # Try next provider
+            
+            # 2. Try AkShare (Fallback)
+            try:
+                # 只有当 Biying 没有 Licence 或者 失败时才走这里
+                # 用户倾向于必盈，所以这里作为 backup
+                d = ak.stock_zh_a_hist(symbol=code, start_date=start_date_str, end_date=end_date_str, adjust="qfq")
+                if d is not None and not d.empty:
+                     d = d.rename(columns={'日期': '日期', '收盘': '收盘', '涨跌幅': '涨跌幅', '成交额': '成交额'})
+                     return d[['日期', '收盘', '涨跌幅', '成交额']].assign(代码=code)
+            except:
+                pass
+            return None
+
+        # Execute
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_code = {executor.submit(_fetch_stock_daily, code): code for code in cons_codes}
+            
+            completed_count = 0
+            for future in concurrent.futures.as_completed(future_to_code):
+                completed_count += 1
+                if completed_count % 20 == 0 or completed_count == total_stocks:
+                    progress_bar.progress(completed_count / total_stocks)
+                
+                res = future.result()
+                if res is not None and not res.empty:
+                    new_dfs.append(res)
+        
         progress_bar.empty()
         
-        # 合并逻辑
-        if new_data_list:
-            new_df = pd.concat(new_data_list, ignore_index=True)
-            # 类型转换
-            new_df['日期'] = pd.to_datetime(new_df['日期'])
-            new_df['涨跌幅'] = pd.to_numeric(new_df['涨跌幅'], errors='coerce')
-            new_df['成交额'] = pd.to_numeric(new_df['成交额'], errors='coerce')
-            new_df['收盘'] = pd.to_numeric(new_df['收盘'], errors='coerce')
+        # Merge Results
+        if new_dfs:
+            df_new_all = pd.concat(new_dfs, ignore_index=True)
+            # Type conversion
+            df_new_all['日期'] = pd.to_datetime(df_new_all['日期'])
+            for col in ['收盘', '涨跌幅', '成交额']:
+                if col in df_new_all.columns:
+                    df_new_all[col] = pd.to_numeric(df_new_all[col], errors='coerce')
             
-            if cached_df.empty:
-                final_df = new_df
+            # Append to cache
+            if not cached_df.empty:
+                # Remove overlaps
+                cached_df = cached_df[cached_df['日期'] < pd.to_datetime(start_date_str)]
+                final_df = pd.concat([cached_df, df_new_all], ignore_index=True)
             else:
-                # 合并旧数据和新数据，并去重
-                st.toast(f"📥 成功获取 {len(new_df)} 条新记录")
-                final_df = pd.concat([cached_df, new_df], ignore_index=True)
-                # 按 '日期' + '代码' 去重，保留新的（如果重叠）
-                final_df.drop_duplicates(subset=['日期', '代码'], keep='last', inplace=True)
-        else:
-            # 没下载到新数据（可能是假期）
-            final_df = cached_df
+                final_df = df_new_all
             
-        if final_df.empty:
-            return pd.DataFrame()
-
-        final_df = final_df.sort_values('日期')
-        
-        # 使用最新的 stock_names 更新 DataFrame 中的名称列
-        if final_df is not None and not final_df.empty:
-            # 只更新存在的代码
-            final_df['名称'] = final_df['代码'].map(stock_names).fillna(final_df['名称'])
-        
-        # 只有当有新数据 或者 是首次下载时，才保存
-        if new_data_list or cached_df.empty:
-            try:
-                if not os.path.exists("data"):
-                    os.makedirs("data")
-                final_df.to_parquet(CACHE_FILE)
-                if not cached_df.empty:
-                    st.toast("💾 增量数据已合并并保存")
-                else:
-                    st.success("💾 全量数据已初始化")
-            except Exception as e:
-                st.warning(f"无法保存缓存: {e}")
-
-        logger.info("历史数据加载完成: 行数=%s", len(final_df))
-        return final_df
+            # Save
+            final_df = final_df.sort_values(['代码', '日期'])
+            status_text.success(f"✅ [{pool_desc}] 更新完成: {len(df_new_all)} 条新记录")
+            
+            final_df = _refresh_cached_names(final_df)
+            final_df.to_parquet(current_cache_file)
+            
+            return final_df
+        else:
+            status_text.warning("未获取到新数据 (可能是非交易日)")
+            return _refresh_cached_names(cached_df)
 
     except Exception as e:
-        logger.exception("全局数据错误: %s", e)
-        st.error(f"全局数据错误: {e}")
-        status_text.empty()
-        progress_bar.empty()
-        return pd.DataFrame()
+        status_text.error(f"[{pool_desc}] 更新失败: {e}")
+        logger.error(f"History update failed: {e}")
+        return _refresh_cached_names(cached_df)
+
+
+def _refresh_cached_names(df):
+    if df.empty: return df
+    
+    # 尝试读取通用映射
+    name_map = {}
+    if os.path.exists(NAME_MAP_FILE):
+        try:
+            with open(NAME_MAP_FILE, 'r', encoding='utf-8') as f:
+                name_map = json.load(f)
+        except:
+            pass
+            
+    # 只更新名称列，保留其他
+    if '代码' in df.columns:
+        # 如果 df 中没有名称列，或者我们想更新它
+        df['名称'] = df['代码'].apply(lambda c: name_map.get(str(c), str(c)))
+        
+    return df
 
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=3600*24, show_spinner=False)
