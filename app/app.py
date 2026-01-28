@@ -44,10 +44,12 @@ from core.data_access import (
 from ui.history_view import render_history_view
 from ui.data_manager_view import render_data_manager
 from ui.divergence_view import render_divergence_view
+from ui.stock_analysis_view import render_stock_analysis_view
 
-NAV_HISTORY = "\u23ea \u5386\u53f2\u76d8\u9762\u56de\u653e"
-NAV_DIVERGENCE = "\U0001F30A \u8d44\u91d1\u504f\u79bb\u5206\u6790"
-NAV_MANAGER = "\U0001F5C2\ufe0f \u6570\u636e\u7ba1\u7406"
+NAV_HISTORY = "⏪ 历史盘面回放"
+NAV_STOCK = "📈 个股多日分析"
+NAV_DIVERGENCE = "🌊 资金偏离分析"
+NAV_MANAGER = "📂 数据管理"
 
 # 2. UI 布局
 # -----------------------------------------------------------------------------
@@ -179,7 +181,7 @@ with st.sidebar:
     st.markdown("---")
     
     # 导航栏
-    nav_option = st.radio("📡 功能导航", [NAV_HISTORY, NAV_DIVERGENCE, NAV_MANAGER], index=0)
+    nav_option = st.radio("📡 功能导航", [NAV_HISTORY, NAV_STOCK, NAV_DIVERGENCE, NAV_MANAGER], index=0)
     prev_nav = st.session_state.get("nav_option_prev")
     if prev_nav != nav_option:
         st.session_state["nav_option_prev"] = nav_option
@@ -231,6 +233,9 @@ if not origin_df.empty:
     
     if nav_option == NAV_HISTORY:
         render_history_view(df, available_dates)
+    
+    elif nav_option == NAV_STOCK:
+        render_stock_analysis_view(origin_df)
 
     elif nav_option == NAV_MANAGER:
         render_data_manager(origin_df)

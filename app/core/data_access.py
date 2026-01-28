@@ -1141,7 +1141,7 @@ def background_prefetch_task(date_list, origin_df):
     total_dates = len(date_list)
     logger.info("后台任务开始预取 %s 天数据 (并发数: %s)", total_dates, INTRADAY_WORKERS)
     
-    indices_codes = ["000300", "000001", "399001"]
+    indices_codes = ["000300", "000001", "399001", "000905", "000852"]
     
     # 获取当前上下文
     ctx = get_script_run_ctx()
@@ -1201,7 +1201,9 @@ def fetch_intraday_data_v2(stock_codes, target_date_str, period=DEFAULT_MIN_PERI
     indices_map = {
         "000300": "📊 沪深300",
         "000001": "📈 上证指数",
-        "399001": "📉 深证成指"
+        "399001": "📉 深证成指",
+        "000905": "📊 中证500",
+        "000852": "📊 中证1000"
     }
 
     # 任务列表
