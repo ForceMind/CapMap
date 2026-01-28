@@ -114,13 +114,40 @@ PY
 
 STATUS="$(git status --porcelain)"
 if [[ -n "$STATUS" ]]; then
-  echo "检测到本地有未提交修改："
+  echo "⚠️  检测到本地有未提交的代码修改："
   echo "$STATUS"
+  echo "-----------------------------------"
+  
   if [[ -t 0 ]]; then
-    read -r -p "仍要继续更新吗？(y/N) " ANSWER
-    case "${ANSWER,,}" in
-      y|yes) ;;
-      *) echo "已取消更新。"; exit 1 ;;
+    echo "选项："
+    echo " 1) [推荐] 强制覆盖本地修改 (Reset Hard)"
+    echo " 2) 尝试保留修改并更新 (Stash -> Pull -> Pop)"
+    echo " 3) 取消更新"
+    read -r -p "请选择 (默认1): " CHOICE
+    CHOICE="${CHOICE:-1}"
+    
+    case "$CHOICE" in
+      1)
+        echo "正在强制重置本地代码..."
+        git fetch "$REMOTE"
+        git reset --hard "$REMOTE/$BRANCH"
+        echo "✅ 本地代码已重置为远程最新版本。"
+        # We need to continue execution to install deps if needed, but pull is done via reset
+        PULL_DONE=1
+        ;;
+      2)
+        echo "正在暂存本地修改..."
+        git stash
+        echo "正在拉取更新..."
+        git pull "$REMOTE" "$BRANCH"
+        echo "正在恢复本地修改..."
+        git stash pop || echo "⚠️  恢复修改时发生冲突，请手动解决。"
+        PULL_DONE=1
+        ;;
+      *)
+        echo "已取消。"
+        exit 1
+        ;;
     esac
   else
     echo "非交互模式下检测到未提交修改，已中止。"
@@ -128,12 +155,23 @@ if [[ -n "$STATUS" ]]; then
   fi
 fi
 
-echo "正在拉取最新代码：$REMOTE/$BRANCH"
-git fetch "$REMOTE" --prune
-if ! git pull --ff-only "$REMOTE" "$BRANCH"; then
-  echo "更新失败：需要手动处理冲突或分支不同步。"
-  echo "请执行：git status"
-  exit 1
+if [[ -z "${PULL_DONE:-}" ]]; then
+  echo "正在拉取最新代码：$REMOTE/$BRANCH"
+  git fetch "$REMOTE" --prune
+  if ! git pull --ff-only "$REMOTE" "$BRANCH"; then
+    echo "❌ 自动更新失败 (无法快进)。"
+    if [[ -t 0 ]]; then
+       read -r -p "是否尝试强制重置(Reset Hard)以解决此问题？(y/N) " FORCE_RST
+       if [[ "${FORCE_RST,,}" == "y" ]]; then
+          git reset --hard "$REMOTE/$BRANCH"
+          echo "✅ 已强制重置为远程最新版本。"
+       else
+          exit 1
+       fi
+    else
+       exit 1
+    fi
+  fi
 fi
 
 if [[ -t 0 ]]; then

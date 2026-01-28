@@ -163,7 +163,7 @@ with st.sidebar:
                 st.rerun()
             except Exception as e:
                 st.error(f"恢复失败: {e}")
-    st.info("数据源：沪深300成分股 (AkShare)")
+    st.info("数据源：沪深300成分股 (Biying)")
     st.caption("注：方块大小使用'成交额'代替'市值'，\n反映当日交易热度。")
 
     st.markdown("---")
