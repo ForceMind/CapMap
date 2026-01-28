@@ -41,11 +41,11 @@ from core.data_access import (
     _start_auto_prefetch_if_needed,
     _start_manual_prefetch,
 )
-from app.ui.history_view import render_history_view
-from app.ui.data_manager_view import render_data_manager
-from app.ui.divergence_view import render_divergence_view
-from app.ui.stock_analysis_view import render_stock_analysis_view
-from app.ui.market_overview import render_market_overview  # 新增
+from ui.history_view import render_history_view
+from ui.data_manager_view import render_data_manager
+from ui.divergence_view import render_divergence_view
+from ui.stock_analysis_view import render_stock_analysis_view
+from ui.market_overview import render_market_overview  # 新增
 
 NAV_OVERVIEW = "🔍 市场概览 (Market Overview)"
 NAV_HISTORY = "⏪ 历史盘面回放"

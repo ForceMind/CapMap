@@ -215,7 +215,6 @@ def fetch_biying_stock_list(licence):
     rows = _extract_biying_rows(payload)
     
     if not rows:
-        # Fallback?
         return {}
 
     df = pd.DataFrame(rows)
@@ -235,6 +234,62 @@ def fetch_biying_stock_list(licence):
     df[code_col] = df[code_col].str.replace(r"\\..*$", "", regex=True) # remove suffix like .SH
     df[name_col] = df[name_col].astype(str)
     return dict(zip(df[code_col], df[name_col]))
+
+
+def fetch_biying_all_realtime(licence):
+    """
+    获取全市场实时行情快照 (替代 AkShare stock_zh_a_spot_em)
+    API: https://all.biyingapi.com/hsrl/real/all/{licence}
+    """
+    if not licence:
+        return pd.DataFrame()
+        
+    # 注意: all.biyingapi.com 可能不同于普通的 api.biyingapi.com
+    # 但为了简单，如果 BIYING_BASE_URL 是默认的，我们手动构造
+    base = "https://all.biyingapi.com"
+    path = f"/hsrl/real/all/{urllib.parse.quote(licence)}"
+    url = f"{base}{path}"
+    
+    payload = _fetch_biying_json(url, timeout=30)
+    rows = _extract_biying_rows(payload)
+    if not rows:
+        return pd.DataFrame()
+        
+    df = pd.DataFrame(rows)
+    # 按需重命名列以匹配 AkShare 或内部格式
+    # Biying columns: dm(代码), mc(名称), p(现价), zf(涨幅), cje(成交额)...
+    rename_map = {
+        "dm": "code", "mc": "name", 
+        "p": "close", "zf": "pct_chg",
+        "cje": "amount", "cjl": "volume",
+        "o": "open", "h": "high", "l": "low", 
+        "z": "prev_close"
+    }
+    # 过滤掉不存在的
+    rename_map = {k: v for k, v in rename_map.items() if k in df.columns}
+    df = df.rename(columns=rename_map)
+    return df
+
+def fetch_biying_index_list(licence):
+    """获取所有指数列表"""
+    if not licence:
+        return pd.DataFrame()
+    url = _build_biying_url(f"/hsindex/list/{urllib.parse.quote(licence)}")
+    payload = _fetch_biying_json(url)
+    rows = _extract_biying_rows(payload)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+def fetch_biying_stock_info(code, licence):
+    """获取个股资料"""
+    if not licence: return None
+    url = _build_biying_url(f"/hscp/gsjj/{code}/{urllib.parse.quote(licence)}")
+    payload = _fetch_biying_json(url)
+    # Payload likely a dict directly or list of 1
+    if isinstance(payload, list) and len(payload) > 0:
+        return payload[0]
+    return payload
 
 
 def fetch_biying_index_cons(index_code, licence):

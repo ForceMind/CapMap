@@ -20,6 +20,8 @@ from core.providers import (
     fetch_biying_intraday,
     fetch_biying_stock_list,
     fetch_biying_index_cons, # Add this
+    fetch_biying_all_realtime, # 新增
+    fetch_biying_stock_info, # 新增
     get_biying_licence,
     get_provider_order,
 )
@@ -101,61 +103,54 @@ def get_all_stocks_list(force_update=False):
         if status_msg: status_msg.error(f"Biying List Error: {e}")
 
     # ---------------------------------------------------------
-    # Fallback to AkShare (Old Logic)
+    # Fallback to Biying Realtime All (If basic list failed)
     # ---------------------------------------------------------
     try:
-        # 使用 st.spinner 如果在 streamlit 环境下
-        status_msg = st.empty()
-        status_msg.info("⏳ 正在从 AkShare 同步全市场股票列表 (尝试接口1)...")
-        logging.info("Fetching all stocks from AkShare...")
+        from core.providers import fetch_biying_all_realtime
+        status_msg = st.empty() if 'st' in globals() else None
         
-        df = None
-        # 尝试使用 stock_zh_a_spot_em (实时行情接口，数据最全但可能不稳定)
-        try:
-            df = ak.stock_zh_a_spot_em()
-            df = df[['代码', '名称']].rename(columns={'代码': 'code', '名称': 'name'})
-        except Exception as e1:
-            logging.warning(f"Interface 1 (spot) failed: {e1}. Trying fallback...")
-            status_msg.info("⏳ 接口1超时，尝试接口2 (stock_info_a_code_name)...")
-            # 备用接口: stock_info_a_code_name (仅代码和名称，更轻量)
-            df = ak.stock_info_a_code_name()
-            df = df.rename(columns={'code': 'code', 'name': 'name'}) # 确保列名一致
-
-        if df is None or df.empty:
-            raise Exception("所有 AkShare 接口均未返回有效数据。")
-
-        status_msg.info("⏳ 正在生成拼音索引...")
-        # Generate Pinyin
-        def get_pinyin_first_letters(text):
-            try:
-                if not isinstance(text, str): return ""
-                return "".join([p[0].upper() for p in lazy_pinyin(text) if p])
-            except:
-                return ""
-            
-        df['pinyin'] = df['name'].apply(get_pinyin_first_letters)
+        # 只有当 Biying 基本列表获取失败时才尝试这个，或者可以默认优先用这个？
+        # 目前流程是先试 fetch_biying_stock_list，如果失败了才到这里。
+        # 我们用这个作为 AkShare 之前的第一道防线
+        if status_msg: status_msg.info("⏳ 尝试从必盈(Biying)获取全量实时快照作为列表...")
+        licence = get_biying_licence()
+        real_df = fetch_biying_all_realtime(licence)
         
-        # Save
-        if not os.path.exists("data"):
-            os.makedirs("data")
-        df.to_csv(ALL_STOCKS_CACHE_FILE, index=False)
-        
-        status_msg.success(f"✅ 股票列表已更新 (共 {len(df)} 只)")
-        time.sleep(1) # Show success for a second
-        status_msg.empty()
-        
-        return df
+        if not real_df.empty:
+             logging.info(f"Fetched {len(real_df)} stocks from Biying Snapshot.")
+             df = real_df[['code', 'name']].copy()
+             
+             # Pinyin
+             if status_msg: status_msg.info("⏳ 正在生成拼音索引...")
+             def get_pinyin_first_letters(text):
+                try:
+                    if not isinstance(text, str): return ""
+                    return "".join([p[0].upper() for p in lazy_pinyin(text) if p])
+                except:
+                    return ""
+             df['pinyin'] = df['name'].apply(get_pinyin_first_letters)
+             
+             # Save
+             if not os.path.exists("data"):
+                os.makedirs("data")
+             df.to_csv(ALL_STOCKS_CACHE_FILE, index=False)
+             
+             if status_msg:
+                status_msg.success(f"✅ 股票列表已更新(Biying快照) (共 {len(df)} 只)")
+                time.sleep(1)
+                status_msg.empty()
+             return df
     except Exception as e:
-        err_msg = f"Error fetching stocks from AkShare: {e}"
-        logging.error(err_msg)
-        if 'status_msg' in locals():
-            status_msg.error(f"❌ 同步失败: {e}")
-        
-        # 如果下载失败，尝试读取旧缓存即使过期
-        if os.path.exists(ALL_STOCKS_CACHE_FILE):
-             st.toast("⚠️ 网络错误，本次将使用旧缓存列表")
-             return pd.read_csv(ALL_STOCKS_CACHE_FILE, dtype={'code': str})
-        return pd.DataFrame(columns=['code', 'name', 'pinyin'])
+        logging.error(f"Biying Snapshot fetch failed: {e}")
+
+    # If Biying also failed or no licence
+    if os.path.exists(ALL_STOCKS_CACHE_FILE):
+         if 'st' in globals():
+             st.toast("⚠️ 无法获取股票列表 (需配置Biying Licence)，使用缓存")
+         logging.warning("Failed to fetch stock list from Biying. Using cache.")
+         return pd.read_csv(ALL_STOCKS_CACHE_FILE, dtype={'code': str})
+    
+    return pd.DataFrame(columns=['code', 'name', 'pinyin'])
 
 APP_LOG_FILE = "logs/app.log"
 INTRADAY_WORKERS = int(os.environ.get("INTRADAY_WORKERS", "50"))
@@ -538,15 +533,23 @@ def _extract_name_from_kv_df(df):
     return None
 
 def _fetch_name_for_code(code):
+    """获取单个股票名称 (优先 Biying)"""
     code = str(code)
-    if hasattr(ak, "stock_individual_info_em"):
-        try:
-            df = ak.stock_individual_info_em(symbol=code)
-            name = _extract_name_from_kv_df(df)
-            if name:
-                return name
-        except Exception as e:
-            logger.warning("获取名称失败: code=%s err=%s", code, e)
+    try:
+        from core.providers import fetch_biying_stock_info, get_biying_licence
+        licence = get_biying_licence()
+        if licence:
+             # Biying API: /hscp/gsjj/{code} -> 返回包括股票名称的信息
+             info = fetch_biying_stock_info(code, licence)
+             # 可能的返回: {'dm': '600000', 'mc': '浦发银行', ...}
+             if info and isinstance(info, dict):
+                 name = info.get("mc") or info.get("name") or info.get("名称")
+                 if name:
+                     return name
+    except Exception as e:
+        logger.warning(f"Biying name fetch failed: {e}")
+
+    # AkShare fallback removed
     return None
 
 def _should_refresh_names(state, now_ts):
@@ -808,19 +811,8 @@ def refetch_daily_data(date_obj):
                     except:
                         pass
                 
-                if p == 'akshare':
-                    try:
-                        # akshare hist
-                        d = ak.stock_zh_a_hist(symbol=code, start_date=date_str, end_date=date_str, adjust="qfq")
-                        if d is not None and not d.empty:
-                            # 格式化列名以匹配缓存结构
-                            # akshare returns: 日期, 开盘, 收盘, 最高, 最低, 成交量, 成交额, 振幅, 涨跌幅, 涨跌额, 换手率
-                            d = d.rename(columns={
-                                '日期': '日期', '收盘': '收盘', '涨跌幅': '涨跌幅', '成交额': '成交额'
-                            })
-                            return d[['日期', '收盘', '涨跌幅', '成交额']].assign(代码=code)
-                    except:
-                        pass
+                # akshare block removed as part of migration to Biying
+                pass
             return None
 
         # 简单进度显示（在日志中）
@@ -1018,16 +1010,8 @@ def fetch_history_data(index_pool="000300"):
                 except Exception as e:
                     pass # Try next provider
             
-            # 2. Try AkShare (Fallback)
-            try:
-                # 只有当 Biying 没有 Licence 或者 失败时才走这里
-                # 用户倾向于必盈，所以这里作为 backup
-                d = ak.stock_zh_a_hist(symbol=code, start_date=start_date_str, end_date=end_date_str, adjust="qfq")
-                if d is not None and not d.empty:
-                     d = d.rename(columns={'日期': '日期', '收盘': '收盘', '涨跌幅': '涨跌幅', '成交额': '成交额'})
-                     return d[['日期', '收盘', '涨跌幅', '成交额']].assign(代码=code)
-            except:
-                pass
+            # 2. AkShare fallback removed as requested.
+            # If Biying fails, we return None.
             return None
 
         # Execute
@@ -1153,61 +1137,7 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period=DEFAULT_MIN_P
             logger.warning("????????: code=%s date=%s period=%s err=%s", symbol, date_str_norm, period_use, exc)
         return None
 
-    def _try_akshare():
-        nonlocal last_err
-        api_name = "index_zh_a_hist_min_em" if is_index else "stock_zh_a_hist_min_em"
-        for attempt in range(max_retries):
-            try:
-                logger.info("????: %s code=%s date=%s period=%s", api_name, symbol, date_str_norm, period)
-                if is_index:
-                    df = ak.index_zh_a_hist_min_em(symbol=symbol, period=period, start_date=start_time, end_date=end_time)
-                else:
-                    df = ak.stock_zh_a_hist_min_em(symbol=symbol, start_date=start_time, end_date=end_time, period=period, adjust='qfq')
-
-                if df is not None and not df.empty:
-                    logger.info("??????: code=%s date=%s period=%s rows=%s", symbol, date_str_norm, period, len(df))
-                    if fetch_cached_min_data.current_backoff > 0:
-                        logger.info("API ?????????")
-                        fetch_cached_min_data.current_backoff = 0
-
-                    # Rename generic columns based on common AkShare returns
-                    # For stock/index min history, columns are usually: "时间", "开盘", "收盘", "最高", "最低", "成交量", ...
-                    rename_map = {
-                        "时间": "time", "开盘": "open", "收盘": "close", 
-                        "最高": "high", "最低": "low", "成交量": "volume",
-                        "time": "time", "open": "open", "close": "close", "high": "high", "low": "low", "volume": "volume"
-                    }
-                    df.rename(columns=rename_map, inplace=True)
-                    
-                    if 'time' not in df.columns:
-                        # Fallback for weird column names if any
-                        logger.warning("AkShare columns unexpected: %s", df.columns)
-                         # Simple column mapping attempt if positional
-                        if len(df.columns) >= 6:
-                             df.columns = ['time', 'open', 'close', 'high', 'low', 'volume'] + list(df.columns[6:])
-
-                    df['time'] = pd.to_datetime(df['time'])
-                    df['open'] = pd.to_numeric(df['open'], errors='coerce')
-                    df['close'] = pd.to_numeric(df['close'], errors='coerce')
-                    df['high'] = pd.to_numeric(df.get('high', df['close']), errors='coerce')
-                    df['low'] = pd.to_numeric(df.get('low', df['close']), errors='coerce')
-                    df['volume'] = pd.to_numeric(df.get('volume', 0), errors='coerce')
-
-                    base_price = df['open'].iloc[0]
-                    df['pct_chg'] = (df['close'] - base_price) / base_price * 100
-
-                    result = df[['time', 'pct_chg', 'open', 'high', 'low', 'close', 'volume']].copy()
-                    _write_min_cache(cache_path, result)
-                    return result
-                logger.warning("???????: code=%s date=%s period=%s api=%s", symbol, date_str_norm, period, api_name)
-            except Exception as exc:
-                last_err = exc
-                logger.warning("??????: code=%s date=%s period=%s api=%s err=%s", symbol, date_str_norm, period, api_name, exc)
-                if fetch_cached_min_data.current_backoff == 0:
-                    fetch_cached_min_data.current_backoff = 60
-                else:
-                    fetch_cached_min_data.current_backoff *= 2
-        return None
+    # _try_akshare removed. Biying is the sole provider.
 
     for provider in providers:
         if provider == "biying":
@@ -1215,9 +1145,8 @@ def fetch_cached_min_data(symbol, date_str, is_index=False, period=DEFAULT_MIN_P
             if df is not None and not df.empty:
                 return df
         elif provider == "akshare":
-            df = _try_akshare()
-            if df is not None and not df.empty:
-                return df
+            # AkShare removed
+            pass
 
     if raise_on_error and last_err is not None:
         raise last_err
