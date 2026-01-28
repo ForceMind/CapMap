@@ -241,27 +241,38 @@ def fetch_biying_index_cons(index_code, licence):
     """获取指数成分股列表"""
     if not licence:
         return []
+        
+    # 清理代码
+    raw_code = str(index_code).split(".")[0]
     
-    # 尝试多个路径
-    # 1. /zscons/000300/licence (假设)
-    # 2. /hsindex/cons/000300/licence
-    
-    paths_to_try = [
-        f"/zscons/{index_code}/{urllib.parse.quote(licence)}",
-        f"/hsindex/cons/{index_code}/{urllib.parse.quote(licence)}"
+    # 尝试多个路径和代码格式 (000905 or sh000905)
+    candidates = [raw_code]
+    if raw_code == "000300": candidates.append("sh000300")
+    if raw_code == "000905": candidates.append("sh000905")
+    if raw_code == "000852": candidates.append("sh000852")
+
+    paths_templates = [
+        "/zscons/{code}/{licence}",       # 标准
+        "/hsindex/cons/{code}/{licence}", # 历史
+        "/zs/cons/{code}/{licence}"
     ]
-    
+
     rows = []
-    for path in paths_to_try:
-        try:
-            url = _build_biying_url(path)
-            payload = _fetch_biying_json(url)
-            rows = _extract_biying_rows(payload)
-            if rows:
-                break
-        except:
-            pass
-            
+    for c in candidates:
+        for tpl in paths_templates:
+            try:
+                path = tpl.format(code=c, licence=urllib.parse.quote(licence))
+                url = _build_biying_url(path)
+                payload = _fetch_biying_json(url)
+                rows_got = _extract_biying_rows(payload)
+                if rows_got:
+                    rows = rows_got
+                    break
+            except Exception:
+                pass
+        if rows: break
+
+    # 解析 rows (通常包含 code/symbol, name 等)
     cons = []
     for row in rows:
         # 寻找代码字段

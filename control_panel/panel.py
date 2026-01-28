@@ -131,9 +131,9 @@ def _html_page(query):
   <div id="msg-box" class="msg">{html.escape(msg)}</div>
   
   <p>
-    <button id="btn-start" class="btn start" onclick="doAction('start')">启动</button>
-    <button id="btn-stop" class="btn stop" onclick="doAction('stop')">停止</button>
-    <button id="btn-restart" class="btn restart" onclick="doAction('restart')">重启</button>
+    <button id="btn-start" type="button" class="btn start" onclick="doAction('start')">启动</button>
+    <button id="btn-stop" type="button" class="btn stop" onclick="doAction('stop')">停止</button>
+    <button id="btn-restart" type="button" class="btn restart" onclick="doAction('restart')">重启</button>
   </p>
   
   <div class="header">
@@ -205,13 +205,22 @@ async function doAction(action) {{
     try {{
         const url = '/' + action + (TOKEN_PARAM ? TOKEN_PARAM + '&ajax=1' : '?ajax=1');
         const res = await fetch(url, {{ method: 'POST' }});
-        const data = await res.json();
         
-        if (res.ok) {{
-            showMsg(data.msg);
-            fetchStatus(); // immediate refresh
+        const contentType = res.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {{
+            const data = await res.json();
+            if (data.success || res.ok) {{
+                showMsg(data.msg || "操作成功");
+                fetchStatus();
+            }} else {{
+                showMsg("错误: " + (data.msg || "未知错误"));
+            }}
         }} else {{
-            showMsg("错误: " + data.msg);
+            if (res.redirected || res.ok) {{
+                 window.location.reload();
+            }} else {{
+                 showMsg("状态异常: " + res.status);
+            }}
         }}
     }} catch (e) {{
         showMsg("请求失败: " + e);
