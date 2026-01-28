@@ -943,7 +943,22 @@ def fetch_history_data(index_pool="000300"):
             except Exception as e:
                 logger.warning(f"Biying index cons err: {e}")
 
-        # 2. AkShare Fallback (Removed as requested)
+        # 2. AkShare Fallback (RESTORED for 000852/Others)
+        if not cons_codes:
+            try:
+                # 此时尝试通过 AkShare 补充列表 (尤其是中证1000等 Biying 可能缺少的)
+                logger.info(f"Biying list empty, trying AkShare for {index_pool}...")
+                df_ak = ak.index_stock_cons(symbol=index_pool)
+                if df_ak is not None and not df_ak.empty:
+                    # AkShare generic sina implementation returns 'symbol'
+                    col_name = next((c for c in ['symbol', 'stock_code', '品种代码'] if c in df_ak.columns), None)
+                    if col_name:
+                        cons_codes = df_ak[col_name].astype(str).tolist()
+                        st.success(f"✅ AkShare 成功获取 {len(cons_codes)} 只[{pool_desc}]成分股")
+            except Exception as e:
+                logger.warning(f"AkShare index cons failed: {e}")
+
+        # 3. Cache Fallback
         if not cons_codes:
             msg = f"正在尝试从缓存获取 {pool_desc} 成分股..."
             if licence: msg += " (Biying获取为空)"
