@@ -988,31 +988,40 @@ def fetch_history_data(index_pool="000300"):
                     rows = _fetch_biying_history_raw(code, start_date_str, end_date_str, "daily", licence, adj="qfq")
                     if rows:
                         _df = pd.DataFrame(rows)
-                        # Map columns based on observed keys from Biying documentation or typical structure
-                        # Usually: d(date), o(open), c(close), h(high), l(low), v(vol), e(amount), zf(change pct)
                         
-                        rename_map = {}
-                        if 'd' in _df.columns: rename_map['d'] = '日期'
-                        if 'c' in _df.columns: rename_map['c'] = '收盘'
-                        if 'e' in _df.columns: rename_map['e'] = '成交额'
-                        if 'zf' in _df.columns: rename_map['zf'] = '涨跌幅' # Percentage
+                        # --- Enhanced Column Mapping ---
+                        # Map Date: d=date
+                        date_col = next((c for c in ['d', 'date', '日期', 'time'] if c in _df.columns), None)
+                        # Map Close: c=close, p=price
+                        close_col = next((c for c in ['c', 'close', '收盘', 'p'] if c in _df.columns), None)
                         
-                        # Fallback for keys if different
-                        if not rename_map and 'date' in _df.columns:
-                             rename_map = {'date': '日期', 'close': '收盘', 'amount': '成交额', 'pct_chg': '涨跌幅'}
-
-                        if '日期' in rename_map.values() or 'd' in _df.columns:
+                        if date_col and close_col:
+                            rename_map = {date_col: '日期', close_col: '收盘'}
+                            
+                            # Map Amount: e=amount (turnover)
+                            amount_col = next((c for c in ['e', 'amount', '成交额', 'cje', 'money'] if c in _df.columns), None)
+                            if amount_col: rename_map[amount_col] = '成交额'
+                            
+                            # Map change: zf=pct_chg
+                            pct_col = next((c for c in ['zf', 'pct_chg', '涨跌幅', 'zdf'] if c in _df.columns), None)
+                            if pct_col: rename_map[pct_col] = '涨跌幅'
+                            
                             _df = _df.rename(columns=rename_map)
-                            # Ensure columns exist
-                            if '收盘' in _df.columns:
-                                _df['代码'] = code
-                                _df['日期'] = pd.to_datetime(_df['日期'])
-                                # Fill missing cols
-                                for col in ['涨跌幅', '成交额']:
-                                    if col not in _df.columns: _df[col] = 0.0
-                                return _df[['日期', '收盘', '涨跌幅', '成交额', '代码']]
+                            
+                            _df['代码'] = code
+                            _df['日期'] = pd.to_datetime(_df['日期'])
+                            
+                            # Fill missing
+                            for col in ['涨跌幅', '成交额']:
+                                if col not in _df.columns: _df[col] = 0.0
+                                
+                            return _df[['日期', '收盘', '涨跌幅', '成交额', '代码']]
+                        else:
+                            # Log structure mismatch for debugging
+                            logger.warning(f"Biying data structure mismatch for {code}. Columns found: {_df.columns.tolist()}")
+
                 except Exception as e:
-                    logger.debug(f"Biying daily fetch worker error {code}: {e}")
+                    logger.warning(f"Biying daily fetch worker error {code}: {e}")
             
             # 2. AkShare Fallback (RESTORED)
             try:
