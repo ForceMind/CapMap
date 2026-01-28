@@ -231,6 +231,15 @@ def render_history_view(df, available_dates):
         metric_label_chg = "区间涨跌幅中位数"
         metric_label_to = "区间总成交"
 
+    # --- 统一：补全股票名称 (防止显示为代码) ---
+    _codes = daily_df['代码'].astype(str).unique().tolist()
+    if _codes:
+        _nmap = _refresh_name_map_for_codes(_codes, force=False)
+        if _nmap:
+            # fillna ensures we keep existing name if map misses (though usually map is better)
+            # Use map to overwrite potential code-as-name
+            daily_df['名称'] = daily_df['代码'].astype(str).map(_nmap).fillna(daily_df['名称'])
+
     # 显示指标行
     col1, col2, col3, col4 = st.columns(4)
     col1.metric(metric_label_date, display_date_str)
@@ -612,18 +621,23 @@ def render_history_view(df, available_dates):
     # 当 '名称' 为空字符串时，Plotly 会将其误判为根节点，导致层级冲突
     valid_mask = (daily_df['名称'].notna()) & (daily_df['名称'].astype(str).str.strip() != "") & (daily_df['成交额'] > 0)
     plot_df = daily_df[valid_mask].copy()
+
+    # 优化显示：名称下显示代码
+    plot_df['显示标签'] = plot_df['名称'].astype(str)
+    # 如果想都显示： plot_df['显示标签'] = plot_df['名称'] + "\n" + plot_df['代码'].astype(str)
     
     if plot_df.empty:
         st.warning("暂无足够数据绘制市场全景热力图")
     else:
         fig = px.treemap(
             plot_df,
-            path=['名称'],
+            path=['显示标签'], # 使用处理后的名称
             values='成交额', # 用成交额代表热度/权重 (因为历史市值难获取)
             color='涨跌幅',
             color_continuous_scale=['#00a65a', '#ffffff', '#dd4b39'], # 绿 -> 白 -> 红
             range_color=[min_limit, max_limit],
             hover_data={
+                '显示标签': False,
                 '名称': True,
                 '代码': True,
                 '收盘': True,
@@ -636,7 +650,7 @@ def render_history_view(df, available_dates):
         # 优化显示
         fig.update_traces(
             textinfo="label+value+percent entry",
-            hovertemplate="<b>%{label}</b><br>收盘价: %{customdata[2]}<br>涨跌幅: %{color:.2f}%<br>成交额: %{value:.2s}"
+            hovertemplate="<b>%{customdata[0]}</b> (%{customdata[1]})<br>收盘价: %{customdata[2]}<br>涨跌幅: %{color:.2f}%<br>成交额: %{value:.2s}"
         )
         fig.update_layout(
             margin=dict(t=10, l=10, r=10, b=10),
