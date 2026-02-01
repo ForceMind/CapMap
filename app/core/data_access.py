@@ -890,6 +890,60 @@ def refetch_daily_data(date_obj):
         logger.error("修复数据失败: %s", e)
         return False, str(e)
 
+
+def _get_trade_calendar():
+    """获取交易日历 (缓存12小时)"""
+    cache_file = "data/trade_calendar.json"
+    now_ts = time.time()
+    calendar_dates = []
+    
+    # 1. Load Cache
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'r') as f:
+                data = json.load(f)
+                if now_ts - data.get('ts', 0) < 43200: # 12 hours
+                    calendar_dates = data.get('dates', [])
+        except: pass
+        
+    # 2. Fetch if needed
+    if not calendar_dates:
+        try:
+            import akshare as ak
+            # tool_trade_date_hist_sina returns a df with 'trade_date' column (datetime object or string)
+            df = ak.tool_trade_date_hist_sina()
+            if not df.empty:
+                # Convert to set of strings 'YYYY-MM-DD'
+                df['trade_date'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d')
+                calendar_dates = df['trade_date'].tolist()
+                
+                # Save cache
+                with open(cache_file, 'w') as f:
+                    json.dump({'ts': now_ts, 'dates': calendar_dates}, f)
+        except Exception as e:
+            logger.warning(f"Failed to fetch trade calendar: {e}")
+            
+    return set(calendar_dates)
+
+def _is_trading_day(date_obj):
+    """
+    判断是否为交易日
+    1. 周末检测 (周六周日)
+    2. 节假日检测 (通过AkShare获取交易日历)
+    """
+    # 1. Check Weekend (0=Mon, 6=Sun)
+    if date_obj.weekday() >= 5: 
+        return False
+        
+    # 2. Check Calendar
+    calendar = _get_trade_calendar()
+    if calendar:
+        d_str = date_obj.strftime("%Y-%m-%d")
+        if d_str not in calendar:
+            return False # Not in trade calendar (e.g. Holiday)
+            
+    return True
+
 def get_start_date(years_back=2):
     """计算 N 年前的日期，返回 YYYYMMDD 字符串"""
     target = datetime.now() - timedelta(days=365 * years_back)
@@ -939,14 +993,26 @@ def fetch_history_data(index_pool="000300", force_today=False):
     now = datetime.now()
     today = now.date()
     
-    # 自动更新逻辑:
-    # 1. 如果 force_today=True (用户手动刷新今日)，则必须包含 today
-    # 2. 否则，只有在 15:15 之后才尝试自动拉取 today
-    include_today = force_today or (now.hour > 15 or (now.hour == 15 and now.minute >= 15))
+    # Check if today is a trading day
+    is_today_trading = _is_trading_day(today)
     
+    # 自动更新逻辑:
+    # 1. 如果 force_today=True (用户手动刷新今日)，强制拉取 (即便是非交易日，可能用户想拉取休市前的快照?) 
+    #    但一般非交易日也没数据。如果是周末，强制禁止，除非 force_today 明确要求。
+    # 2. 只有在 交易日 且 15:15 之后才尝试自动拉取 today
+    
+    is_after_market = now.hour > 15 or (now.hour == 15 and now.minute >= 15)
+    
+    if force_today:
+        include_today = True
+    else:
+        # 非强制模式：必须是交易日 AND 收盘后
+        include_today = is_today_trading and is_after_market
+
     if include_today:
         end_date_str = today.strftime("%Y%m%d")
     else:
+        # 如果不包含今天，结束日期设为昨天
         end_date_str = (today - timedelta(days=1)).strftime("%Y%m%d")
     
     if last_cached_date:
@@ -955,12 +1021,17 @@ def fetch_history_data(index_pool="000300", force_today=False):
         target_date = datetime.strptime(end_date_str, "%Y%m%d").date()
         
         if last_cached_date >= target_date:
+             # 如果已经是最新的
              if not (force_today and last_cached_date == today):
                  return _refresh_cached_names(cached_df)
              else:
                  logger.info("强制刷新今日数据，移除缓存中今日部分")
                  cached_df = cached_df[cached_df['日期'].dt.date < today]
-                 last_cached_date = cached_df['日期'].max().date() if not cached_df.empty else None
+                 # Re-evaluate last_cached_date after partial removal
+                 if not cached_df.empty:
+                    last_cached_date = cached_df['日期'].max().date()
+                 else:
+                    last_cached_date = None # Cache became empty
                  
         if last_cached_date:
              start_date_str = (last_cached_date + timedelta(days=1)).strftime("%Y%m%d")
@@ -969,12 +1040,29 @@ def fetch_history_data(index_pool="000300", force_today=False):
     else:
         # 如果是首次下载，默认下载2年
         start_date_str = get_start_date(2)
-        
-    end_date_str = today.strftime("%Y%m%d")
 
-    # 如果不需要更新
+    # 再次检查：start_date > end_date ?
+    # 比如：今天是周日(非交易日) -> include_today=False -> end_date=周六 -> target=周六.
+    # 缓存已经是周五. -> last_cached_date(周五) < target_date(周六).
+    # -> start_date = 周六.  end_date = 周六.
+    # -> Worker 会去请求周六的数据. (结果应该是空的)
+    # 我们可以再优化一下: 如果 end_date 不是交易日，往前推直到找到交易日?
+    # AkShare 接口对非交易日通常只是返回空，不会报错。
+    # 但为了避免无意义请求，我们可以检查 [start, end] 范围内是否有交易日
+    
     if start_date_str > end_date_str:
-        return _refresh_cached_names(cached_df)
+         return _refresh_cached_names(cached_df)
+    
+    # Check if the single day to update is actually a non-trading day
+    # This prevents "Warning: No Data" when we try to update Saturday on Sunday morning
+    if start_date_str == end_date_str:
+        try:
+            check_date = datetime.strptime(start_date_str, "%Y%m%d")
+            if not _is_trading_day(check_date):
+                 logger.info(f"Skipping update for non-trading day: {start_date_str}")
+                 st.caption(f"📅 跳过非交易日更新: {start_date_str}")
+                 return _refresh_cached_names(cached_df)
+        except: pass
 
     # -------------------------------------------------------------------------
     # 开始下载更新流程
