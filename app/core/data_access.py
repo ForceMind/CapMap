@@ -297,13 +297,7 @@ def _save_prefetch_state(state):
     except Exception as e:
         logger.warning("\u4fdd\u5b58\u81ea\u52a8\u9884\u53d6\u72b6\u6001\u5931\u8d25: %s", e)
 
-def _is_trading_day(target_date, origin_df):
-    if origin_df is None or origin_df.empty:
-        return False
-    try:
-        return target_date in set(origin_df['日期'].dt.date)
-    except Exception:
-        return False
+# _is_trading_day definition removed (duplicate, see valid definition below)
 
 def _get_daily_codes(origin_df, target_date):
     if origin_df is None or origin_df.empty:
@@ -423,7 +417,8 @@ def _start_auto_prefetch_if_needed(origin_df):
     if now.hour < h or (now.hour == h and now.minute < m):
         return
     today = now.date()
-    if not _is_trading_day(today, origin_df):
+    # Use global _is_trading_day (single argument)
+    if not _is_trading_day(today):
         return
     today_str = today.strftime("%Y-%m-%d")
     state = _load_prefetch_state()
