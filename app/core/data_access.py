@@ -153,14 +153,17 @@ def get_all_stocks_list(force_update=False):
     return pd.DataFrame(columns=['code', 'name', 'pinyin'])
 
 APP_LOG_FILE = "logs/app.log"
-INTRADAY_WORKERS = int(os.environ.get("INTRADAY_WORKERS", "50"))
-INTRADAY_DELAY_SEC = float(os.environ.get("INTRADAY_DELAY_SEC", "0.05"))
+# Reduce default concurrent workers from 50 to 8
+INTRADAY_WORKERS = int(os.environ.get("INTRADAY_WORKERS", "8")) 
+# Increase delay between requests from 0.05s to 0.5s
+INTRADAY_DELAY_SEC = float(os.environ.get("INTRADAY_DELAY_SEC", "0.5")) 
 DEFAULT_MIN_PERIOD = os.environ.get("DEFAULT_MIN_PERIOD", "5")
 AUTO_PREFETCH_ENABLED = os.environ.get("AUTO_PREFETCH_ENABLED", "1") == "1"
 AUTO_PREFETCH_TIME = os.environ.get("AUTO_PREFETCH_TIME", "15:15")
-AUTO_PREFETCH_DELAY_SEC = float(os.environ.get("AUTO_PREFETCH_DELAY_SEC", "10"))
+# Increase delay for auto-prefetch too
+AUTO_PREFETCH_DELAY_SEC = float(os.environ.get("AUTO_PREFETCH_DELAY_SEC", "2.0")) 
 AUTO_PREFETCH_RETRY_SLEEP_SEC = float(os.environ.get("AUTO_PREFETCH_RETRY_SLEEP_SEC", "300"))
-AUTO_PREFETCH_MAX_RETRIES = int(os.environ.get("AUTO_PREFETCH_MAX_RETRIES", "0"))
+AUTO_PREFETCH_MAX_RETRIES = int(os.environ.get("AUTO_PREFETCH_MAX_RETRIES", "3"))
 AUTO_PREFETCH_STATE_FILE = "data/auto_prefetch_state.json"
 
 def _init_logging():
@@ -400,12 +403,12 @@ def _start_manual_prefetch(date_str, codes, name_map, include_indices=True):
             codes,
             name_map,
             include_indices=include_indices,
-            delay_sec=AUTO_PREFETCH_DELAY_SEC,
+            delay_sec=INTRADAY_DELAY_SEC, # Updated to use configurable secure delay
             retry_sleep_sec=AUTO_PREFETCH_RETRY_SLEEP_SEC,
-            max_retries=AUTO_PREFETCH_MAX_RETRIES,
+            max_retries=3,
             job_tag="manual",
         )
-    t = threading.Thread(target=_worker, daemon=True)
+    t = threading.Thread(target=_worker, name="ManualPrefetchWorker", daemon=True)
     t.start()
     return True
 
