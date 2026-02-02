@@ -942,6 +942,64 @@ def _is_trading_day(date_obj):
             
     return True
 
+# New Local Cons Persistence Logic
+CONS_CACHE_FILE_TEMPLATE = "data/cons_{pool}.json"
+
+def _load_local_cons(pool_code):
+    f = CONS_CACHE_FILE_TEMPLATE.format(pool=pool_code)
+    if not os.path.exists(f):
+        return None
+    try:
+        with open(f, 'r', encoding='utf-8') as fp:
+            data = json.load(fp)
+            if isinstance(data, dict) and 'codes' in data and isinstance(data['codes'], list):
+                return data
+    except Exception as e:
+        logger.warning(f"Failed to load local cons cache: {e}")
+    return None
+
+def _save_local_cons(pool_code, codes):
+    f = CONS_CACHE_FILE_TEMPLATE.format(pool=pool_code)
+    try:
+        if not os.path.exists("data"):
+            os.makedirs("data")
+        with open(f, 'w', encoding='utf-8') as fp:
+            json.dump({
+                'updated': datetime.now().strftime("%Y-%m-%d"),
+                'codes': codes
+            }, fp)
+        logger.info(f"Saved local cons cache for {pool_code}: {len(codes)} items")
+    except Exception as e:
+        logger.warning(f"Failed to save local cons cache: {e}")
+
+def _should_refresh_cons(local_data):
+    """
+    判断是否需要联网更新成分股列表
+    规则:
+    1. 默认有效期 60 天
+    2. 如果当前是 6月 或 12月 (调整月)，且上次更新不在本月，则强制更新
+    """
+    if not local_data: return True
+    last_update = local_data.get('updated', '2000-01-01')
+    try:
+        last_dt = datetime.strptime(last_update, "%Y-%m-%d")
+    except:
+        return True
+        
+    now = datetime.now()
+    
+    # Rule 2: Adjustment Months (Jun, Dec)
+    if now.month in [6, 12]:
+        if last_dt.month != now.month or last_dt.year != now.year:
+             return True
+             
+    # Rule 1: General Expiration (60 days)
+    days_diff = (now - last_dt).days
+    if days_diff > 60: 
+        return True
+        
+    return False
+
 def get_start_date(years_back=2):
     """计算 N 年前的日期，返回 YYYYMMDD 字符串"""
     target = datetime.now() - timedelta(days=365 * years_back)
@@ -1070,47 +1128,62 @@ def fetch_history_data(index_pool="000300", force_today=False):
     progress_bar = st.progress(0)
     
     try:
-        # A. 获取成分股列表 (优先 Biying, 其次 Biying Stock List 过滤? 不推荐, 再次 AkShare)
+        # A. 获取成分股列表 (优先尝试本地持久化配置)
         cons_codes = []
         
-        # 1. Biying Interface (Requires implementation in providers.py)
-        if licence:
-            from core.providers import fetch_biying_index_cons
-            # 注意: Biying 的指数代码可能不一样, 但通用标准是一样的
-            try:
-                cons_codes = fetch_biying_index_cons(index_pool, licence)
-            except Exception as e:
-                logger.warning(f"Biying index cons err: {e}")
-
-        # 2. AkShare Fallback (RESTORED for 000852/Others)
-        if not cons_codes:
-            try:
-                # 此时尝试通过 AkShare 补充列表 (尤其是中证1000等 Biying 可能缺少的)
-                logger.info(f"Biying list empty, trying AkShare for {index_pool}...")
-                df_ak = ak.index_stock_cons(symbol=index_pool)
-                if df_ak is not None and not df_ak.empty:
-                    # AkShare generic sina implementation returns 'symbol'
-                    col_name = next((c for c in ['symbol', 'stock_code', '品种代码'] if c in df_ak.columns), None)
-                    if col_name:
-                        cons_codes = df_ak[col_name].astype(str).tolist()
-                        st.success(f"✅ AkShare 成功获取 {len(cons_codes)} 只[{pool_desc}]成分股")
-            except Exception as e:
-                logger.warning(f"AkShare index cons failed: {e}")
-
-        # 3. Cache Fallback
-        if not cons_codes:
-            msg = f"正在尝试从缓存获取 {pool_desc} 成分股..."
-            if licence: msg += " (Biying获取为空)"
-            st.write(msg)
-            
-            # Try to infer index cons from existing huge stock list if possible, or just fail cleanly
-            # Or better: check cache for ANY historical data and just assume those are the cons for now
-            if not cached_df.empty:
-                cons_codes = cached_df['代码'].unique().tolist()
-                st.info(f"使用本地缓存中的 {len(cons_codes)} 只股票作为成分股")
-            
+        # 0. Check Local Persisted Cons List
+        local_cons = _load_local_cons(index_pool)
+        should_refresh_cons = _should_refresh_cons(local_cons)
         
-        # 3. Last resort fallback / check
+        if local_cons and not should_refresh_cons:
+            cons_codes = local_cons['codes']
+            logger.info(f"Using local persisted cons list for {index_pool} (Updated: {local_cons.get('updated')})")
+        
+        if not cons_codes:
+            logger.info(f"Fetching fresh cons list for {index_pool}...")
+            # 1. Biying Interface (Requires implementation in providers.py)
+            if licence:
+                from core.providers import fetch_biying_index_cons
+                # 注意: Biying 的指数代码可能不一样, 但通用标准是一样的
+                try:
+                    cons_codes = fetch_biying_index_cons(index_pool, licence)
+                except Exception as e:
+                    logger.warning(f"Biying index cons err: {e}")
+
+            # 2. AkShare Fallback (RESTORED for 000852/Others)
+            if not cons_codes:
+                try:
+                    # 此时尝试通过 AkShare 补充列表 (尤其是中证1000等 Biying 可能缺少的)
+                    logger.info(f"Biying list empty, trying AkShare for {index_pool}...")
+                    df_ak = ak.index_stock_cons(symbol=index_pool)
+                    if df_ak is not None and not df_ak.empty:
+                        # AkShare generic sina implementation returns 'symbol'
+                        col_name = next((c for c in ['symbol', 'stock_code', '品种代码'] if c in df_ak.columns), None)
+                        if col_name:
+                            cons_codes = df_ak[col_name].astype(str).tolist()
+                            st.success(f"✅ AkShare 成功获取 {len(cons_codes)} 只[{pool_desc}]成分股")
+                except Exception as e:
+                    logger.warning(f"AkShare index cons failed: {e}")
+            
+            # Save Fresh List if found
+            if cons_codes:
+                _save_local_cons(index_pool, cons_codes)
+
+        # 3. Cache Fallback (Final Safety Net)
+        if not cons_codes:
+            # Fallback to expired local cons if available
+            if local_cons:
+                cons_codes = local_cons['codes']
+                st.warning(f"无法联网更新成分股，使用本地旧列表 ({local_cons.get('updated')})")
+            else:
+                 logger.info("External sources failed, trying to recover cons from local cache...")
+                 if not cached_df.empty and '代码' in cached_df.columns:
+                     cons_codes = cached_df['代码'].unique().astype(str).tolist()
+                     logger.info(f"Recovered {len(cons_codes)} cons from local history cache.")
+                     if len(cons_codes) > 0:
+                         st.toast(f"⚠️ 网络获取成分股失败，使用本地缓存的 {len(cons_codes)} 只股票继续更新")
+        
+        # 4. Last resort check
         if not cons_codes:
              if not cached_df.empty:
                  status_text.warning("无法更新成分股列表，但已加载历史缓存。")

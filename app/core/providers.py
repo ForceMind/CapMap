@@ -365,6 +365,15 @@ def fetch_biying_index_cons(index_code, licence):
 
     if raw_code == "000300":
         candidates.append("hs300")
+        candidates.append("000300")
+    elif raw_code == "000905":
+        candidates.append("zhishu_000905")
+        candidates.append("zz500")
+    elif raw_code == "000852":
+        # CSI 1000 - try multiple known formats
+        candidates.append("zhishu_000852")
+        candidates.append("zz1000")
+        candidates.append("000852")
     elif raw_code == "399001":
         candidates.append("zhishu_399001")
     elif raw_code == "000001":
@@ -381,13 +390,14 @@ def fetch_biying_index_cons(index_code, licence):
     
     rows = []
     
-    for c in candidates:
+    for c in list(dict.fromkeys(candidates)): # Remove duplicates preserving order
         try:
             path = path_template.format(code=c, licence=urllib.parse.quote(licence))
             url = _build_biying_url(path)
             payload = _fetch_biying_json(url)
             rows = _extract_biying_rows(payload)
             if rows:
+                LOGGER.info(f"Biying index cons found via code '{c}'")
                 break
         except Exception:
             pass
