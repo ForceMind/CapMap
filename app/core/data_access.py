@@ -1102,21 +1102,34 @@ def fetch_history_data(index_pool="000300", force_today=False):
     # 缓存已经是周五. -> last_cached_date(周五) < target_date(周六).
     # -> start_date = 周六.  end_date = 周六.
     # -> Worker 会去请求周六的数据. (结果应该是空的)
-    # 我们可以再优化一下: 如果 end_date 不是交易日，往前推直到找到交易日?
-    # AkShare 接口对非交易日通常只是返回空，不会报错。
-    # 但为了避免无意义请求，我们可以检查 [start, end] 范围内是否有交易日
+
+    # 优化: 推进 start_date 直到它是交易日 (Push start_date until it is a trading day)
+    try:
+        start_dt = datetime.strptime(start_date_str, "%Y%m%d")
+        end_dt = datetime.strptime(end_date_str, "%Y%m%d")
+        
+        while start_dt <= end_dt:
+            if _is_trading_day(start_dt):
+                break
+            # logger.info(f"Skipping non-trading start day: {start_dt.strftime('%Y%m%d')}")
+            # st.caption(f"📅 跳过非交易日: {start_dt.strftime('%Y%m%d')}")
+            start_dt += timedelta(days=1)
+            
+        start_date_str = start_dt.strftime("%Y%m%d")
+    except:
+        pass
     
     if start_date_str > end_date_str:
+         logger.info("No trading days in range to update.")
          return _refresh_cached_names(cached_df)
     
-    # Check if the single day to update is actually a non-trading day
-    # This prevents "Warning: No Data" when we try to update Saturday on Sunday morning
+    # Check if the single day to update is actually a non-trading day (Double check)
     if start_date_str == end_date_str:
         try:
             check_date = datetime.strptime(start_date_str, "%Y%m%d")
             if not _is_trading_day(check_date):
                  logger.info(f"Skipping update for non-trading day: {start_date_str}")
-                 st.caption(f"📅 跳过非交易日更新: {start_date_str}")
+                 # st.caption(f"📅 跳过非交易日更新: {start_date_str}")
                  return _refresh_cached_names(cached_df)
         except: pass
 
@@ -1354,7 +1367,7 @@ def fetch_history_data(index_pool="000300", force_today=False):
                      
                      # Try AkShare Fallback
                      if snap_df.empty:
-                          import akshare as ak
+                          # import akshare as ak # Removed local import to fix UnboundLocalError
                           try:
                               s = ak.stock_zh_a_spot_em()
                               if not s.empty:
