@@ -976,8 +976,8 @@ def _should_refresh_cons(local_data):
     """
     判断是否需要联网更新成分股列表
     规则:
-    1. 默认有效期 60 天
-    2. 如果当前是 6月 或 12月 (调整月)，且上次更新不在本月，则强制更新
+    1. 默认有效期 180 天 (半年)
+    2. 可以在这里增加强制刷新月份的逻辑，但 "半年一次" 已经足够覆盖
     """
     if not local_data: return True
     last_update = local_data.get('updated', '2000-01-01')
@@ -988,14 +988,9 @@ def _should_refresh_cons(local_data):
         
     now = datetime.now()
     
-    # Rule 2: Adjustment Months (Jun, Dec)
-    if now.month in [6, 12]:
-        if last_dt.month != now.month or last_dt.year != now.year:
-             return True
-             
-    # Rule 1: General Expiration (60 days)
+    # Rule: 180 days expiration
     days_diff = (now - last_dt).days
-    if days_diff > 60: 
+    if days_diff > 180: 
         return True
         
     return False
@@ -1053,17 +1048,16 @@ def fetch_history_data(index_pool="000300", force_today=False):
     is_today_trading = _is_trading_day(today)
     
     # 自动更新逻辑:
-    # 1. 如果 force_today=True (用户手动刷新今日)，强制拉取 (即便是非交易日，可能用户想拉取休市前的快照?) 
-    #    但一般非交易日也没数据。如果是周末，强制禁止，除非 force_today 明确要求。
-    # 2. 只有在 交易日 且 15:15 之后才尝试自动拉取 today
+    # 1. 如果 force_today=True (用户手动刷新今日)，强制拉取
+    # 2. 如果是交易日，自动纳入今日(尝试获取实时快照)
     
     is_after_market = now.hour > 15 or (now.hour == 15 and now.minute >= 15)
     
     if force_today:
         include_today = True
     else:
-        # 非强制模式：必须是交易日 AND 收盘后
-        include_today = is_today_trading and is_after_market
+        # Logic Update: Always try to include today if it is a trading day
+        include_today = is_today_trading
 
     if include_today:
         end_date_str = today.strftime("%Y%m%d")
@@ -1072,10 +1066,25 @@ def fetch_history_data(index_pool="000300", force_today=False):
         end_date_str = (today - timedelta(days=1)).strftime("%Y%m%d")
     
     if last_cached_date:
-        # 如果缓存已经包含目标结束日期(或更新)，则无需下载
-        # 除非是强制刷新今日且缓存里已经是今日(需要覆盖)
+        # 如果缓存已经包含目标结束日期
         target_date = datetime.strptime(end_date_str, "%Y%m%d").date()
         
+        # Special Case: If cache has Today, but we are still in trading hours, 
+        # we treat the cached "Today" as partial/stale and allow refresh if we want real-time.
+        # However, to avoid spamming APIs on every reload, we can trust the cache 
+        # unless 'force_today' is clicked OR if the cache file is 'older' than X minutes? 
+        # (File mtime check is expensive here, simplification: Trust cache unless forced, OR if last_cached was yesterday)
+        
+        # Wait, if we want "Auto update", we must allow fetching if cache is missing today.
+        
+        is_cache_stale_for_today = False
+        if last_cached_date == today and is_today_trading and not is_after_market:
+             # We have today's data, but market is still open. 
+             # For now, let's NOT auto-refresh constantly to save quota. 
+             # User can click "Refresh Today". 
+             # So we considers it "Up to date" unless force_today is True.
+             pass
+
         if last_cached_date >= target_date:
              # 如果已经是最新的
              if not (force_today and last_cached_date == today):

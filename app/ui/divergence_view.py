@@ -9,13 +9,20 @@ def render_divergence_view(df, available_dates):
 
     # 1. 周期选择 (Reuse simplified logic)
     available_dates = sorted(df['日期'].dt.date.unique())
+    
+    # Allow selection of "Today" if it's missing from data (so user knows they need to refresh)
+    max_d = available_dates[-1]
+    today = pd.Timestamp.now().date()
+    if today > max_d: 
+        max_d = today
+
     col_d1, col_d2 = st.columns(2)
     with col_d1:
         date_range_div = st.date_input(
             "分析周期",
             value=[available_dates[-5] if len(available_dates)>5 else available_dates[0], available_dates[-1]],
             min_value=available_dates[0],
-            max_value=available_dates[-1],
+            max_value=max_d,
             key="divergence_date_input"
         )
     
@@ -25,7 +32,10 @@ def render_divergence_view(df, available_dates):
         target_dates_div = [d for d in available_dates if s_d <= d <= e_d]
     
     if not target_dates_div:
-        st.warning("请选择有效的时间范围")
+        if len(date_range_div) == 2 and date_range_div[1] > available_dates[-1]:
+             st.warning(f"⚠️ 日期 {date_range_div[1]} 暂无数据。请点击侧边栏【刷新今日行情】获取实时快照。")
+        else:
+             st.warning("请选择有效的时间范围")
         st.stop()
         
     st.caption(f"已选取 {target_dates_div[0]} 至 {target_dates_div[-1]}，共 {len(target_dates_div)} 个交易日。")

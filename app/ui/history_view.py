@@ -47,11 +47,18 @@ def render_history_view(df, available_dates):
             # 原 select_slider 替换为 date_input 以支持快速年份选择
             current_date_val = available_dates[st.session_state.selected_date_idx]
             
+            # Allow picking today to show hint
+            max_d = available_dates[-1]
+            try:
+                today = pd.Timestamp.now().date()
+                if today > max_d: max_d = today
+            except: pass
+
             picked_date = st.date_input(
                 "日期",
                 value=current_date_val,
                 min_value=available_dates[0],
-                max_value=available_dates[-1],
+                max_value=max_d,
                 label_visibility="collapsed"
             )
             
@@ -60,10 +67,16 @@ def render_history_view(df, available_dates):
                 if picked_date in available_dates:
                     st.session_state.selected_date_idx = available_dates.index(picked_date)
                 else:
-                    # 如果选中的是非交易日，寻找最近的交易日
+                    # Enhance Logic: Provide specific hint for Today
+                    if picked_date > available_dates[-1]:
+                         st.toast(f"⚠️ {picked_date} 暂无数据。如需查看今日盘中行情，请点击侧边栏【刷新今日行情】。")
+                    else:
+                         st.toast(f"📅 休市日，已自动定位到最近交易日")
+
+                    # Revert to valid date to prevent crash
                     closest_date = min(available_dates, key=lambda d: abs(d - picked_date))
                     st.session_state.selected_date_idx = available_dates.index(closest_date)
-                    st.toast(f"📅 休市日，已自动定位到最近交易日: {closest_date}")
+                    
                 st.rerun()
         
         target_dates = [available_dates[st.session_state.selected_date_idx]] # 使用 state 中的日期
@@ -72,11 +85,17 @@ def render_history_view(df, available_dates):
         
     else: # 多日走势拼接
         with mode_col2:
+            max_d = available_dates[-1]
+            try:
+                today = pd.Timestamp.now().date()
+                if today > max_d: max_d = today
+            except: pass
+
             date_range = st.date_input(
                 "选择时间范围 (建议不超过5天，否则加载较慢)",
                 value=[available_dates[-5] if len(available_dates)>5 else available_dates[0], available_dates[-1]],
                 min_value=available_dates[0],
-                max_value=available_dates[-1]
+                max_value=max_d
             )
         
         if len(date_range) == 2:
@@ -84,7 +103,10 @@ def render_history_view(df, available_dates):
             # 筛选出范围内的交易日
             target_dates = [d for d in available_dates if start_d <= d <= end_d]
             if not target_dates: # 如果选定的范围内没有交易日 (例如全选了假期)
-                st.warning("⚠️ 选定范围内无交易数据，已自动重置为最近交易日")
+                if end_d > available_dates[-1]:
+                    st.warning(f"⚠️ {end_d} 暂无数据。如需查看今日行情，请点击侧边栏【刷新今日行情】。")
+                else:
+                    st.warning("⚠️ 选定范围内无交易数据，已自动重置为最近交易日")
                 target_dates = [available_dates[-1]]
             
             st.info(f"已选择 {len(target_dates)} 个交易日进行拼接展示")

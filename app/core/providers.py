@@ -357,40 +357,48 @@ def fetch_biying_index_cons(index_code, licence):
     # 清理代码
     raw_code = str(index_code).split(".")[0]
     
-    # 映射表: 常用指数 -> Biying 内部代码
+    # 映射表: 常用指数 -> Biying 最稳/最常用的代码
+    # 减少无效试错请求，直接命中核心代码
     # 000300 -> hs300
-    # 000905 -> zhishu_000905
-    # 000852 -> zhishu_000852
+    # 000905 -> zz500
+    # 000852 -> zz1000 (优先通过 sectors 接口获取，此处为备用)
+    
+    best_guess_map = {
+        "000300": "hs300",
+        "000905": "zz500",
+        "000852": "zz1000",
+        "399001": "zhishu_399001",
+        "000001": "zhishu_000001"
+    }
+    
     candidates = []
-
-    if raw_code == "000300":
-        candidates.append("hs300")
-        candidates.append("000300")
-    elif raw_code == "000905":
-        candidates.append("zhishu_000905")
-        candidates.append("zz500")
-    elif raw_code == "000852":
-        # CSI 1000 - try multiple known formats
-        candidates.append("zhishu_000852")
-        candidates.append("zz1000")
-        candidates.append("000852")
-    elif raw_code == "399001":
-        candidates.append("zhishu_399001")
-    elif raw_code == "000001":
-        candidates.append("zhishu_000001")
+    if raw_code in best_guess_map:
+        candidates.append(best_guess_map[raw_code])
     else:
         # 默认尝试 zhishu_ 前缀
         candidates.append(f"zhishu_{raw_code}")
-
-    # 兜底：尝试原始代码 (某些旧接口可能还活着)
-    candidates.append(raw_code)
 
     # 路径：/hszg/gg/{code}/{licence}
     path_template = "/hszg/gg/{code}/{licence}"
     
     rows = []
     
+    # [Priority Spec] CSI 1000 Special Sector URL
+    # User confirmed stable interface: https://api.biyingapi.com/hslt/sectors/中证1000/Licence
+    if raw_code == "000852":
+         try:
+            # 直接指定中文名称 "中证1000"
+            path = f"/hslt/sectors/{urllib.parse.quote('中证1000')}/{urllib.parse.quote(licence)}"
+            url = _build_biying_url(path)
+            payload = _fetch_biying_json(url)
+            rows = _extract_biying_rows(payload)
+            if rows:
+                 LOGGER.info("Biying index cons found via Sector URL '中证1000'")
+         except Exception as e:
+            LOGGER.warning(f"Biying CSI 1000 Sector URL failed: {e}")
+
     for c in list(dict.fromkeys(candidates)): # Remove duplicates preserving order
+        if rows: break # If found in priority check, skip candidates
         try:
             path = path_template.format(code=c, licence=urllib.parse.quote(licence))
             url = _build_biying_url(path)
