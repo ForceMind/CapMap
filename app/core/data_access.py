@@ -1034,6 +1034,15 @@ def fetch_history_data(index_pool="000300", force_today=False):
     if os.path.exists(current_cache_file):
         try:
             cached_df = pd.read_parquet(current_cache_file)
+            
+            # --- Check Essential Columns ---
+            req_cols = ['最高', '最低', '开盘']
+            if not all(c in cached_df.columns for c in req_cols):
+                logger.warning(f"Cache missing {req_cols}, recreating...")
+                cached_df = pd.DataFrame()
+                last_cached_date = None
+            # -------------------------------
+
             if not cached_df.empty:
                 last_cached_date = cached_df['日期'].max().date()
                 st.toast(f"✅ [{pool_desc}] 日线行情已就绪: {last_cached_date}")
@@ -1254,6 +1263,16 @@ def fetch_history_data(index_pool="000300", force_today=False):
                             # Map change: zf=pct_chg
                             pct_col = next((c for c in ['zf', 'pct_chg', '涨跌幅', 'zdf'] if c in _df.columns), None)
                             if pct_col: rename_map[pct_col] = '涨跌幅'
+
+                            # Map OHLC
+                            open_col = next((c for c in ['o', 'open', '开盘'] if c in _df.columns), None)
+                            if open_col: rename_map[open_col] = '开盘'
+                            
+                            high_col = next((c for c in ['h', 'high', '最高'] if c in _df.columns), None)
+                            if high_col: rename_map[high_col] = '最高'
+                            
+                            low_col = next((c for c in ['l', 'low', '最低'] if c in _df.columns), None)
+                            if low_col: rename_map[low_col] = '最低'
                             
                             _df = _df.rename(columns=rename_map)
                             
@@ -1278,6 +1297,13 @@ def fetch_history_data(index_pool="000300", force_today=False):
                             # Fill missing
                             if '成交额' not in _df.columns: _df['成交额'] = 0.0
                             
+                            for col in ['开盘', '最高', '最低']:
+                                if col not in _df.columns:
+                                    if '收盘' in _df.columns:
+                                        _df[col] = _df['收盘']
+                                    else:
+                                        _df[col] = 0.0
+                            
                             # Calculate Change % if missing but have Close and PreClose (pc)
                             if '涨跌幅' not in _df.columns:
                                 if 'pc' in _df.columns and '收盘' in _df.columns:
@@ -1294,7 +1320,7 @@ def fetch_history_data(index_pool="000300", force_today=False):
                             _df['涨跌幅'] = _df['涨跌幅'].fillna(0.0)
                             _df['成交额'] = _df['成交额'].fillna(0.0)
                                 
-                            return _df[['日期', '收盘', '涨跌幅', '成交额', '代码']]
+                            return _df[['日期', '收盘', '涨跌幅', '成交额', '开盘', '最高', '最低', '代码']]
                         else:
                             # Log structure mismatch for debugging
                             logger.warning(f"Biying data structure mismatch for {code}. Columns found: {_df.columns.tolist()}")
@@ -1307,8 +1333,8 @@ def fetch_history_data(index_pool="000300", force_today=False):
                 # 只有当 Biying 没有 Licence 或者 失败时才走这里
                 d = ak.stock_zh_a_hist(symbol=code, start_date=start_date_str, end_date=end_date_str, adjust="qfq")
                 if d is not None and not d.empty:
-                     d = d.rename(columns={'日期': '日期', '收盘': '收盘', '涨跌幅': '涨跌幅', '成交额': '成交额'})
-                     return d[['日期', '收盘', '涨跌幅', '成交额']].assign(代码=code)
+                     d = d.rename(columns={'日期': '日期', '收盘': '收盘', '涨跌幅': '涨跌幅', '成交额': '成交额', '开盘': '开盘', '最高': '最高', '最低': '最低'})
+                     return d[['日期', '收盘', '涨跌幅', '成交额', '开盘', '最高', '最低']].assign(代码=code)
             except Exception as e:
                 logger.debug(f"AkShare daily fetch worker error {code}: {e}")
 
@@ -1336,7 +1362,7 @@ def fetch_history_data(index_pool="000300", force_today=False):
             df_new_all = pd.concat(new_dfs, ignore_index=True)
             # Type conversion
             df_new_all['日期'] = pd.to_datetime(df_new_all['日期'])
-            for col in ['收盘', '涨跌幅', '成交额']:
+            for col in ['收盘', '涨跌幅', '成交额', '开盘', '最高', '最低']:
                 if col in df_new_all.columns:
                     df_new_all[col] = pd.to_numeric(df_new_all[col], errors='coerce')
             

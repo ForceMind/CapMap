@@ -204,7 +204,7 @@ with st.sidebar:
     st.markdown("---")
     
     # 导航栏
-    nav_option = st.radio("📡 功能导航", [NAV_OVERVIEW, NAV_HISTORY, NAV_STOCK, NAV_DIVERGENCE, NAV_MANAGER], index=0)
+    nav_option = st.radio("📡 功能导航", [NAV_OVERVIEW, NAV_HISTORY, NAV_STOCK, NAV_DIVERGENCE, NAV_MANAGER], index=0, key="nav_main_option")
     prev_nav = st.session_state.get("nav_option_prev")
     if prev_nav != nav_option:
         st.session_state["nav_option_prev"] = nav_option
