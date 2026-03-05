@@ -7,3 +7,12 @@ app/ui/__pycache__/
 app/ui/__init__.py
 logs/app.log
 app/__pycache__/
+
+# Server runtime artifacts
+.capmap_deploy.conf
+.streamlit/
+.venv/
+logs/
+*.pid
+run.sh
+stop.sh
