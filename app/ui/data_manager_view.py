@@ -8,6 +8,7 @@ from core.data_access import (
     _get_daily_codes,
     _scan_cached_dates,
     _start_manual_prefetch,
+    refetch_daily_data,
 )
 
 
@@ -21,6 +22,7 @@ def render_data_manager(origin_df):
         return
 
     all_dates = sorted(origin_df['日期'].dt.date.unique())
+    all_dates_desc = sorted(all_dates, reverse=True)
 
     with tab1:
         st.metric("总交易天数", len(all_dates))
@@ -44,15 +46,26 @@ def render_data_manager(origin_df):
             st.success("日线数据覆盖看起来正常 (每天 > 200 只股票).")
 
         st.line_chart(daily_counts.set_index('日期'))
+        st.markdown("### 单日修复")
+        repair_date = st.date_input("选择要修复的交易日", value=all_dates_desc[0], min_value=all_dates[0], max_value=all_dates[-1], key="repair_daily_date")
+        if st.button("修复该日线数据", key="repair_daily_btn"):
+            with st.spinner(f"正在修复 {repair_date} 日线数据..."):
+                ok, msg = refetch_daily_data(repair_date)
+            if ok:
+                st.success(msg)
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error(f"修复失败: {msg}")
 
     with tab2:
         st.caption("分时数据 (Minutes) 缓存覆盖率查询")
         
         col_d1, col_d2 = st.columns([1, 2])
         with col_d1:
-            date_strs = [d.strftime("%Y-%m-%d") for d in all_dates]
-            # 默认选最近一天
-            selected_date_str = st.selectbox("选择交易日期", date_strs, index=len(date_strs) - 1)
+            date_strs = [d.strftime("%Y-%m-%d") for d in all_dates_desc]
+            # 默认显示最新日期在最上面
+            selected_date_str = st.selectbox("选择交易日期", date_strs, index=0)
         
         selected_date = datetime.strptime(selected_date_str, "%Y-%m-%d").date()
         date_key = selected_date_str.replace("-", "")
@@ -87,7 +100,11 @@ def render_data_manager(origin_df):
             if missing_codes:
                 st.text_area("缺失代码列表", ",".join(missing_codes), height=150)
                 if st.button("🚀 仅补全缺失数据"):
-                    _start_manual_prefetch([selected_date], origin_df)
+                    started = _start_manual_prefetch(selected_date_str, missing_codes, name_map, include_indices=True)
+                    if started:
+                        st.info("已启动后台补全缺失分时，请查看 logs/app.log")
+                    else:
+                        st.warning("没有可补齐的缺失标的。")
         
         with exist_col:
              st.success(f"已缓存股票 ({len(cached_codes)})")

@@ -71,7 +71,7 @@ def render_history_view(df, available_dates):
                     if picked_date > available_dates[-1]:
                          st.toast(f"⚠️ {picked_date} 暂无数据。如需查看今日盘中行情，请点击侧边栏【刷新今日行情】。")
                     else:
-                         st.toast(f"📅 休市日，已自动定位到最近交易日")
+                         st.toast("该日期无本地数据，已自动定位到最近交易日。如需补齐，请到“数据管理 -> 单日修复”。")
 
                     # Revert to valid date to prevent crash
                     closest_date = min(available_dates, key=lambda d: abs(d - picked_date))
