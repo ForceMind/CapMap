@@ -268,7 +268,16 @@ def render_history_view(df, available_dates):
     col2.metric(metric_label_chg, f"{median_chg:.2f}%", 
                 delta=f"{median_chg:.2f}%", delta_color="normal")
     col3.metric(metric_label_to, f"{total_turnover:.1f} 亿")
-    col4.metric("领涨龙头", f"{top_gainer['名称']} ({'涨跌幅' in top_gainer and top_gainer['涨跌幅'] or top_gainer.get('区间涨跌幅'):.2f}%)")
+    top_name = str(top_gainer.get("名称", "未知"))
+    top_pct = top_gainer.get("涨跌幅", None)
+    if top_pct is None or (isinstance(top_pct, float) and pd.isna(top_pct)):
+        top_pct = top_gainer.get("区间涨跌幅", None)
+    top_pct_num = pd.to_numeric(top_pct, errors="coerce")
+    if pd.isna(top_pct_num):
+        top_text = f"{top_name} (N/A)"
+    else:
+        top_text = f"{top_name} ({top_pct_num:.2f}%)"
+    col4.metric("领涨龙头", top_text)
 
     # --- 新增功能：分时走势叠加 ---
     st.markdown("---")
