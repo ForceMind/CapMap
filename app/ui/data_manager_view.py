@@ -66,12 +66,35 @@ def render_data_manager(origin_df):
             date_strs = [d.strftime("%Y-%m-%d") for d in all_dates_desc]
             # 默认显示最新日期在最上面
             selected_date_str = st.selectbox("选择交易日期", date_strs, index=0)
-        
-        selected_date = datetime.strptime(selected_date_str, "%Y-%m-%d").date()
-        date_key = selected_date_str.replace("-", "")
-        
-        # 获取当日应有的股票
-        codes, name_map = _get_daily_codes(origin_df, selected_date)
+            selected_date = datetime.strptime(selected_date_str, "%Y-%m-%d").date()
+            date_key = selected_date_str.replace("-", "")
+
+            # 以所选交易日的成分股为基准
+            all_codes, name_map = _get_daily_codes(origin_df, selected_date)
+            all_codes = [str(c) for c in all_codes]
+            all_codes_set = set(all_codes)
+
+            # 优先支持“历史回放已选标的”范围，避免“看得到但显示缺失”的错觉
+            scope_mode = st.radio(
+                "校验范围",
+                ["历史回放已选标的", "当日全成分股"],
+                horizontal=True,
+                help="历史回放只拉取 TopN 时，建议用“历史回放已选标的”查看真实覆盖率。",
+            )
+            history_codes_raw = [str(c) for c in st.session_state.get("last_top_codes", [])]
+            history_codes = [c for c in history_codes_raw if c in all_codes_set]
+
+            if scope_mode == "历史回放已选标的":
+                if history_codes:
+                    codes = list(dict.fromkeys(history_codes))
+                    scope_label = "历史回放已选标的"
+                else:
+                    st.info("未检测到历史回放选股，已自动切换为当日全成分股。")
+                    codes = all_codes
+                    scope_label = "当日全成分股(自动)"
+            else:
+                codes = all_codes
+                scope_label = "当日全成分股"
         
         # 获取实际缓存
         cached_codes = _get_cached_codes_for_date(date_key, codes, period=DEFAULT_MIN_PERIOD, is_index=False)
@@ -84,12 +107,11 @@ def render_data_manager(origin_df):
             st.write(f"### {selected_date_str}")
             c1, c2 = st.columns(2)
             c1.metric("指数覆盖", f"{len(cached_indices)} / {len(indices)}")
-            c2.metric("个股覆盖", f"{len(cached_codes)} / {len(codes)}")
+            c2.metric(f"个股覆盖 ({scope_label})", f"{len(cached_codes)} / {len(codes)}")
+            st.caption(f"当前校验范围：{scope_label}，目标股票数 {len(codes)}")
             
-            if len(cached_codes) < len(codes):
-                st.progress(len(cached_codes) / len(codes))
-            else:
-                st.progress(1.0)
+            coverage = (len(cached_codes) / len(codes)) if codes else 1.0
+            st.progress(coverage)
         
         st.divider()
         
@@ -137,7 +159,7 @@ def render_data_manager(origin_df):
                 st.warning("没有可补齐的任务。")
 
         with st.expander("本地分时缓存日期"):
-            cached_dates = _scan_cached_dates(period=DEFAULT_MIN_PERIOD, is_index=False)
+            cached_dates = sorted(_scan_cached_dates(period=DEFAULT_MIN_PERIOD, is_index=False), reverse=True)
             if cached_dates:
                 readable = [d[:4] + '-' + d[4:6] + '-' + d[6:] for d in cached_dates]
                 st.text_area("缓存日期", "\n".join(readable), height=120)

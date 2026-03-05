@@ -82,6 +82,19 @@ with st.sidebar:
     
     with st.expander("数据刷新与维护", expanded=True):
         st.write("如果数据显示不正确，请尝试以下操作：")
+        reset_scope = st.radio(
+            "重置范围",
+            ["全部数据", "按交易日"],
+            horizontal=True,
+            key="reset_scope_mode",
+            help="按交易日只清理指定日期的数据；全部数据会清理所有缓存。",
+        )
+        reset_date = st.date_input(
+            "选择交易日",
+            value=st.session_state.get("reset_target_date", datetime.now().date()),
+            key="reset_target_date",
+            disabled=(reset_scope != "按交易日"),
+        )
         
         # 1. 刷新今日行情 (盘中)
         if st.button("🟢 刷新今日行情 (盘中)"):
@@ -122,19 +135,36 @@ with st.sidebar:
 
         # 4. ????????
         if st.button("🗑️ 删除本地分时缓存"):
-            log_action("删除本地分时缓存")
-            clear_min_cache()
+            if reset_scope == "按交易日":
+                removed = clear_min_cache_for_date(reset_date)
+                log_action("删除本地分时缓存", scope="date", date=reset_date, removed=removed)
+                st.toast(f"✅ 已删除 {reset_date} 的分时缓存文件：{removed} 个。")
+            else:
+                log_action("删除本地分时缓存", scope="all")
+                clear_min_cache()
+                st.toast("✅ 本地分时缓存已全部删除。")
             st.cache_data.clear()
-            st.toast("✅ 本地分时缓存已删除。")
+            st.session_state["force_nav_overview"] = True
+            st.rerun()
 
         # 5. ????
         if st.button("🚨 彻底重置 (删除所有)"):
-            log_action("彻底重置")
-            if os.path.exists(CACHE_FILE):
-                os.remove(CACHE_FILE)
-                st.toast("已删除历史日线缓存。")
-            clear_min_cache()
+            if reset_scope == "按交易日":
+                daily_deleted = delete_daily_cache_for_date(reset_date)
+                min_deleted = clear_min_cache_for_date(reset_date)
+                log_action("按日期重置", date=reset_date, daily_deleted=daily_deleted, min_deleted=min_deleted)
+                st.toast(
+                    f"✅ 已按日期重置 {reset_date}："
+                    f"日线={'已删' if daily_deleted else '无记录'}，分时文件={min_deleted}。"
+                )
+            else:
+                log_action("彻底重置", scope="all")
+                if os.path.exists(CACHE_FILE):
+                    os.remove(CACHE_FILE)
+                    st.toast("已删除历史日线缓存。")
+                clear_min_cache()
             st.cache_data.clear()
+            st.session_state["force_nav_overview"] = True
             st.rerun()
 
     with st.expander("💾 数据备份与恢复", expanded=False):
@@ -204,6 +234,9 @@ with st.sidebar:
     st.markdown("---")
     
     # 导航栏
+    if st.session_state.pop("force_nav_overview", False):
+        st.session_state["nav_main_option"] = NAV_OVERVIEW
+        st.session_state["nav_option_prev"] = NAV_OVERVIEW
     nav_option = st.radio("📡 功能导航", [NAV_OVERVIEW, NAV_HISTORY, NAV_STOCK, NAV_DIVERGENCE, NAV_MANAGER], index=0, key="nav_main_option")
     prev_nav = st.session_state.get("nav_option_prev")
     if prev_nav != nav_option:
@@ -282,4 +315,6 @@ else:
         st.cache_data.clear()
         if os.path.exists("data/csi300_history_cache.parquet"):
             os.remove("data/csi300_history_cache.parquet")
+        clear_min_cache()
+        st.session_state["force_nav_overview"] = True
         st.rerun()

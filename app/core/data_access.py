@@ -754,6 +754,42 @@ def clear_min_cache():
         shutil.rmtree(MIN_CACHE_DIR, ignore_errors=True)
 
 
+def clear_min_cache_for_date(date_obj):
+    """
+    删除指定日期的分时缓存（所有周期、指数/个股目录）。
+    返回删除的文件数量。
+    """
+    if not os.path.isdir(MIN_CACHE_DIR):
+        return 0
+    try:
+        date_key = pd.Timestamp(date_obj).strftime("%Y%m%d")
+    except Exception:
+        date_key = str(date_obj).replace("-", "")
+
+    target_name = f"{date_key}.csv"
+    removed = 0
+
+    for root, _, files in os.walk(MIN_CACHE_DIR):
+        if target_name in files:
+            file_path = os.path.join(root, target_name)
+            try:
+                os.remove(file_path)
+                removed += 1
+            except Exception as e:
+                logger.warning("删除分时缓存失败: path=%s err=%s", file_path, e)
+
+    # 清理空目录，避免留下大量空层级
+    for root, dirs, files in os.walk(MIN_CACHE_DIR, topdown=False):
+        if not dirs and not files:
+            try:
+                os.rmdir(root)
+            except Exception:
+                pass
+
+    logger.info("按日期删除分时缓存: date=%s removed=%s", date_key, removed)
+    return removed
+
+
 def delete_daily_cache_for_date(date_obj):
     """
     删除指定日期的日线缓存数据
