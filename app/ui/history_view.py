@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import time
 
 from core.data_access import fetch_intraday_data_v2, log_action, logger, _refresh_name_map_for_codes
 
